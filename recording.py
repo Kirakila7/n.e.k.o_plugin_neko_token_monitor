@@ -14,6 +14,28 @@ def now():
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+GAME_KINDS = {
+    "start": "猫粮不足，YUI 变成小白猫开始追逐大肥鱼", "catch": "小白猫追到大肥鱼并轻咬",
+    "reverse": "大肥鱼累计被追到十次，戴上虎头帽反追 Q 版 YUI", "counter_tag": "反追中的 YUI 被大肥鱼逮住",
+    "flee": "YUI 正在害怕地逃跑并呼救", "rescue": "用户把 YUI 抱回原站位，精神恢复，本轮怒气清除",
+    "pause": "暂停追逐", "resume": "恢复追逐", "stop": "追逐结束或监测界面关闭",
+}
+
+
+def quota_text(quota):
+    if not quota:
+        return "猫粮余额未知，未编造余额"
+    amount = quota.get("remaining")
+    unit = quota.get("unit", "")
+    text = f"{quota.get('model') or quota.get('source') or '当前来源'}猫粮剩余 {amount} {unit}" if amount is not None else "猫粮余额未知"
+    if quota.get("percent") is not None:
+        text += f"（剩余 {quota['percent']:.1f}%）"
+    text += f"；依据：{quota.get('basis', '未知')}"
+    if quota.get("stale"):
+        text += "；上次记录已过期，不能当成实时余额"
+    return text
+
+
 class Recording:
     def __init__(self, directory, importer=None):
         self.path = Path(directory) / "recording.json"
@@ -24,6 +46,7 @@ class Recording:
         self.stop = threading.Event()
         self.worker = None
         self.load_error = None
+        self.character_name = "YUI"
         raw = None
         for path in (self.path, self.path.with_suffix(".bak")):
             try:
@@ -42,6 +65,7 @@ class Recording:
             sessions = [raw] if raw and raw.get("id") else []
             self.data = {"version": 2, "sessions": sessions}
         self.data.setdefault("sessions", [])
+        self.data.setdefault("observations", [])
 
     def save(self):
         if self.load_error:
@@ -71,12 +95,16 @@ class Recording:
                     "ask": sum(row.get("ask", 0) for row in sessions),
                     "sessions": len(sessions),
                 },
-                pending_memory=sum(bool(row.get("summary") and not row.get("memory_saved")) for row in sessions),
+                game_totals={
+                    "catches": sum(row.get("game", {}).get("catch", 0) for row in sessions),
+                    "rescues": sum(row.get("game", {}).get("rescue", 0) for row in sessions),
+                },
+                pending_memory=sum(bool((row.get("summary") or row.get("game_events")) and not row.get("memory_saved")) for row in sessions + self.data["observations"]),
                 error=self.load_error,
             )
 
-    def action(self, action, event_id=None, session_id=None, kind=None, message=None):
-        if action not in ("start", "pet", "ask", "note", "end", "status", "retry"):
+    def action(self, action, event_id=None, session_id=None, kind=None, message=None, quota=None):
+        if action not in ("start", "pet", "ask", "note", "game", "end", "status", "retry"):
             raise ValueError("Unknown recording action")
         if event_id is not None and (not isinstance(event_id, str) or not 1 <= len(event_id) <= 100):
             raise ValueError("Invalid event id")
@@ -84,13 +112,16 @@ class Recording:
             kind not in ("agent", "connection") or not isinstance(message, str) or not 1 <= len(message) <= 240
         ):
             raise ValueError("Invalid status note")
+        if action == "game" and (kind not in GAME_KINDS or not event_id):
+            raise ValueError("Invalid game event")
         with self.lock:
+            accepted = False
             if self.load_error:
                 return self.snapshot()
             sessions = self.data["sessions"]
             current = sessions[-1] if sessions else None
             if action == "start" and not (current and current.get("active")):
-                current = dict(active=True, id=str(uuid.uuid4()), start=now(), pet=0, ask=0, events=[])
+                current = dict(active=True, id=str(uuid.uuid4()), start=now(), pet=0, ask=0, events=[], character_name=self.character_name)
                 sessions.append(current)
             elif action in ("pet", "ask"):
                 # Replayed clicks are attributed to their original session, even after a crash/exit.
@@ -104,6 +135,20 @@ class Recording:
                         if target.get("summary"):
                             target["summary"] = self.summary(target)
                             target["memory_saved"] = False
+            elif action == "game":
+                target = next((row for row in sessions if row["id"] == session_id), None) if session_id else current
+                if not target or not (target.get("active") or session_id):
+                    return self.snapshot()
+                seen = target.setdefault("events", [])
+                if event_id not in seen:
+                    accepted = True
+                    stats = target.setdefault("game", {})
+                    stats[kind] = stats.get(kind, 0) + 1
+                    seen.append(event_id)
+                    events = target.setdefault("game_events", [])
+                    events.append({"at": now(), "kind": kind, "quota": copy.deepcopy(quota)})
+                    target["memory_saved"] = False
+                    target["memory_revision"] = target.get("memory_revision", 0) + 1
             elif action == "note":
                 target = next((row for row in sessions if row["id"] == session_id), None) if session_id else current
                 if not target or not (target.get("active") or session_id):
@@ -119,11 +164,29 @@ class Recording:
             elif action == "end" and current and current.get("active"):
                 current.update(active=False, end=now(), memory_saved=False)
                 current["summary"] = self.summary(current)
+                current["memory_revision"] = current.get("memory_revision", 0) + 1
             if action != "status":
                 self.save()
-            if action in ("end", "retry"):
+            if action in ("end", "retry") or action == "game" and kind in ("reverse", "rescue", "stop"):
                 self.wake.set()
-            return self.snapshot()
+            result = self.snapshot()
+            if action == "game":
+                result["event_accepted"] = accepted
+            return result
+
+    def remember(self, kind, text, quota=None, event_id=None):
+        """Durable background observations, including when no widget session is active."""
+        with self.lock:
+            if self.load_error:
+                return False
+            rows = self.data["observations"]
+            if event_id and any(row["id"] == event_id for row in rows):
+                return False
+            rows.append({"id": event_id or str(uuid.uuid4()), "start": now(), "end": now(), "pet": 0, "ask": 0,
+                         "kind": kind, "summary": text, "quota": copy.deepcopy(quota), "memory_saved": False, "character_name": self.character_name})
+            self.save()
+            self.wake.set()
+            return True
 
     @staticmethod
     def summary(row):
@@ -133,8 +196,8 @@ class Recording:
         with self.lock:
             pending = [
                 copy.deepcopy(row)
-                for row in self.data["sessions"]
-                if row.get("summary") and not row.get("memory_saved")
+                for row in self.data["sessions"] + self.data["observations"]
+                if (row.get("summary") or row.get("game_events")) and not row.get("memory_saved")
             ]
         for row in pending:
             if self.stop.is_set():
@@ -144,8 +207,8 @@ class Recording:
             except Exception:
                 saved = False
             with self.lock:
-                target = next(item for item in self.data["sessions"] if item["id"] == row["id"])
-                if target.get("summary") == row.get("summary"):
+                target = next(item for item in self.data["sessions"] + self.data["observations"] if item["id"] == row["id"])
+                if target.get("summary") == row.get("summary") and target.get("memory_revision", 0) == row.get("memory_revision", 0):
                     target["memory_saved"] = saved
                     target["memory_error"] = None if saved else "本机记录已保存，YUI 记忆待重试"
                     self.save()
@@ -175,13 +238,21 @@ class Recording:
             self.worker.join(1)
 
     @staticmethod
+    def memory_text(row):
+        if row.get("kind"):
+            return f"猫粮事件 {row['id']}（{row['start']}）：{row['summary']}。{quota_text(row.get('quota'))}。"
+        text = f"猫粮互动记录 {row['id']}：用户与 YUI 在 {row['start']} 至 {row.get('end') or '本次记录时仍在进行'}期间，点击人物摸头 {row.get('pet', 0)} 次，点击气泡询问余额或空闲状态 {row.get('ask', 0)} 次。"
+        game = row.get("game", {})
+        if game:
+            text += f"本段追到肥鱼 {game.get('catch', 0)} 次、攻防转换 {game.get('reverse', 0)} 次、YUI 被反追逮住 {game.get('counter_tag', 0)} 次、用户抱回 {game.get('rescue', 0)} 次。这些是猫粮小游戏中的互动，不是真实伤害。\n"
+        text += "\n".join(f"{event['at']}：{GAME_KINDS.get(event['kind'], event['kind'])}；{quota_text(event.get('quota'))}。" for event in row.get("game_events", []))
+        return text
+
+    @staticmethod
     def import_memory(row):
-        text = (
-            f"猫粮互动记录 {row['id']}：用户与 YUI 在 {row['start']} 至 {row['end']} 的记录模式期间，"
-            f"点击人物摸头 {row['pet']} 次，点击气泡询问余额或空闲状态 {row['ask']} 次。"
-        )
+        text = Recording.memory_text(row)
         payload = {
-            "character_name": "YUI",
+            "character_name": row.get("character_name", "YUI"),
             "source_format": "auto",
             "files": [{"path": "MEMORY.md", "content": "# 猫粮互动记录\n\n- " + text + "\n"}],
         }

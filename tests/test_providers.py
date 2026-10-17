@@ -21,6 +21,30 @@ providers = load("providers")
 core = load("core")
 
 
+def test_face_reference_total_persists_without_clearing_balance():
+    with tempfile.TemporaryDirectory() as d:
+        monitor = core.Monitor(d)
+        monitor.state = {"balances": [{"currency": "CNY", "balance": "5"}]}
+        monitor.configure({"balance_total": "20"})
+        assert monitor.snapshot()["selected"]["balance"] == "5"
+        assert core.Monitor(d).config["balance_total"] == 20
+        monitor.configure({"balance_total": ""})
+        assert core.Monitor(d).config["balance_total"] is None
+
+
+def test_face_reference_total_rejects_invalid_numbers():
+    with tempfile.TemporaryDirectory() as d:
+        monitor = core.Monitor(d)
+        for value in ("nan", "inf", "-1", "1000000000001"):
+            try:
+                monitor.configure({"balance_total": value})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid total accepted")
+        assert monitor.config["balance_total"] is None
+
+
 def test_openai_pagination_and_usd():
     pages = [
         {
@@ -136,6 +160,35 @@ def test_codex_quota_missing_is_not_zero():
         pass
     else:
         raise AssertionError("Unavailable quota became zero")
+
+
+def test_failed_refresh_stays_stale_after_restart(tmp_path):
+    from unittest.mock import patch
+    for source in ("deepseek", "codex", "openai"):
+        monitor = core.Monitor(tmp_path / source)
+        monitor.configure({"source": source, "api_key": "synthetic"})
+        monitor.state = {"balances": [{"currency": monitor.config["currency"], "balance": "1"}],
+                         "updated_at": __import__("time").time()}
+        monitor.write("state.json", monitor.state)
+        def fail(*_):
+            raise ValueError("synthetic query failure")
+        monitor.fetch = fail
+        with patch.object(core, "query", fail), patch.object(core, "read_quota", fail):
+            monitor.refresh()
+        restarted = core.Monitor(tmp_path / source).snapshot()
+        assert restarted["stale"] and restarted["error"] == "synthetic query failure"
+        assert restarted["selected"]["balance"] == "1"
+        assert restarted["estimated_tokens"] is None
+
+
+def test_boolean_balance_is_not_money():
+    for value in (True, False):
+        try:
+            core.parse_balance({"is_available": True, "balance_infos": [{"currency": "USD", "total_balance": value}]})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("boolean interpreted as an account balance")
 
 
 def test_official_shared_balances_and_destinations():

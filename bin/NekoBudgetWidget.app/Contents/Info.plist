@@ -12,8 +12,10 @@
 	<string>猫粮</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.8.19</string>
 	<key>CFBundleVersion</key>
-	<string>0.3.0</string>
+	<string>0.8.19</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>LSUIElement</key>

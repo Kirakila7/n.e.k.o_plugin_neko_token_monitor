@@ -12,6 +12,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .codex_quota import read_quota
+from .desktop_quota import read_quota as read_desktop_quota
+from .harness_bridge import read_balance as read_harness_balance
 from .providers import query, validate_endpoint
 from .usage import add_usage
 
@@ -45,6 +47,8 @@ def parse_balance(payload):
     try:
         for item in payload["balance_infos"]:
             currency = item["currency"]
+            if isinstance(item["total_balance"], bool):
+                raise ValueError()
             amount = Decimal(item["total_balance"])
             if currency not in ("CNY", "USD") or not amount.is_finite():
                 raise ValueError()
@@ -75,7 +79,11 @@ class Monitor:
             "quota_total": None,
             "quota_unit": "次",
             "quota_reset": "",
+            "desktop_app": "trae",
+            "quota_mode": "auto",
+            "aliyun_profile": "",
             "budget": 0,
+            "balance_total": None,
             "budget_start": dt.date.today().replace(day=1).isoformat(),
             "endpoint": "",
             "value_path": "balance",
@@ -120,26 +128,42 @@ class Monitor:
                 "openrouter",
                 "siliconflow",
                 "manual_quota",
+                "desktop_quota",
+                "moonshot_cn",
+                "moonshot_global",
+                "aliyun",
+                "app_bridge",
             ):
                 raise ValueError("查询方式无效")
             # Never reuse a previous provider's secret at a new destination.
             if source != cfg["source"] or values.get("endpoint", cfg["endpoint"]) != cfg["endpoint"]:
                 cfg["api_key"] = ""
             cfg["source"] = source
-            for field in ("model", "endpoint", "value_path", "budget_start"):
+            if source == "app_bridge":
+                cfg["api_key"] = ""
+            for field in ("model", "endpoint", "value_path", "budget_start", "aliyun_profile"):
                 if field in values:
                     if not isinstance(values[field], str) or len(values[field]) > 500:
                         raise ValueError("设置格式无效")
                     cfg[field] = values[field].strip()
-            for field in ("quota_remaining", "quota_total"):
+            if any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for c in cfg["aliyun_profile"]) or len(cfg["aliyun_profile"]) > 80:
+                raise ValueError("阿里云 CLI 配置名无效")
+            for field, choices in (("desktop_app", ("trae", "workbuddy")), ("quota_mode", ("auto", "manual"))):
+                if field in values:
+                    if values[field] not in choices:
+                        raise ValueError("本机额度读取设置无效")
+                    cfg[field] = values[field]
+            for field in ("quota_remaining", "quota_total", "balance_total"):
                 if field in values:
                     raw = values[field]
+                    if isinstance(raw, bool):
+                        raise ValueError("额度数字无效")
                     number = None if raw in (None, "") else float(raw)
                     if number is not None and (not math.isfinite(number) or not 0 <= number <= 1e12):
                         raise ValueError("额度数字无效")
                     cfg[field] = number
             if "quota_unit" in values:
-                if values["quota_unit"] not in ("次", "token", "%"):
+                if values["quota_unit"] not in ("次", "token", "%", "积分"):
                     raise ValueError("额度单位无效")
                 cfg["quota_unit"] = values["quota_unit"]
             if "quota_reset" in values:
@@ -148,7 +172,7 @@ class Monitor:
                     raise ValueError("重置时间无效")
                 cfg["quota_reset"] = value
             remaining, total = cfg["quota_remaining"], cfg["quota_total"]
-            if remaining is not None and total is not None and remaining > total:
+            if not (source == "desktop_quota" and cfg["quota_mode"] == "auto") and remaining is not None and total is not None and remaining > total:
                 raise ValueError("剩余额度不能超过总额度")
             if cfg["quota_unit"] == "%" and remaining is not None and remaining > 100:
                 raise ValueError("百分比不能超过 100")
@@ -159,7 +183,7 @@ class Monitor:
                     not part or not all(c.isalnum() or c == "_" for c in part) for part in cfg["value_path"].split(".")
                 ):
                     raise ValueError("余额字段路径无效")
-            if "api_key" in values and values["api_key"]:
+            if source != "app_bridge" and "api_key" in values and values["api_key"]:
                 key = values["api_key"].strip()
                 if not 8 <= len(key) <= 512 or not key.isascii() or any(c.isspace() for c in key):
                     raise ValueError("API Key 格式不正确")
@@ -186,9 +210,9 @@ class Monitor:
                 if type(values["alerts"]) is not bool:
                     raise ValueError("提醒设置无效")
                 cfg["alerts"] = values["alerts"]
-            if source in ("openai", "anthropic", "openrouter"):
+            if source in ("openai", "anthropic", "openrouter", "moonshot_global"):
                 cfg["currency"] = "USD"
-            if source == "siliconflow":
+            if source in ("siliconflow", "moonshot_cn"):
                 cfg["currency"] = "CNY"
             changed_key = any(
                 cfg[k] != self.config[k]
@@ -204,6 +228,9 @@ class Monitor:
                     "quota_total",
                     "quota_unit",
                     "quota_reset",
+                    "desktop_app",
+                    "quota_mode",
+                    "aliyun_profile",
                 )
             )
             self.write("config.json", cfg)
@@ -235,12 +262,14 @@ class Monitor:
             usage = {k: v for k, v in self.read("usage-jev.json", {}).items() if k != "seen"}
             return {
                 "codex_quota": self.state.get("codex_quota"),
+                "account_quota": self.state.get("account_quota"),
                 "reported_usage": usage,
                 "config": cfg,
                 "basis": self.state.get("basis", "官方账户余额"),
-                "configured": self.config["source"] in ("manual", "jev", "codex", "manual_quota")
+                "configured": self.config["source"] in ("manual", "jev", "codex", "manual_quota", "desktop_quota", "aliyun", "app_bridge")
                 or bool(self.config["api_key"]),
                 "balances": self.state.get("balances", []),
+                "wallet_breakdown": self.state.get("wallet_breakdown"),
                 "selected": row,
                 "updated_at": updated,
                 "error": error,
@@ -271,8 +300,23 @@ class Monitor:
                     self.write("state.json", self.state)
                 except Exception as exc:
                     self.state["error"] = str(exc) if isinstance(exc, ValueError) else "Codex 额度查询失败"
+                    try:
+                        self.write("state.json", self.state)
+                    except OSError:
+                        pass
                 return self.snapshot()
-            if self.config["source"] == "manual_quota":
+            if self.config["source"] == "desktop_quota" and self.config["quota_mode"] == "auto":
+                if self.last_attempt and time.monotonic() - self.last_attempt < 60:
+                    return self.snapshot()
+                self.last_attempt = time.monotonic()
+                try:
+                    quota = read_desktop_quota(self.config["desktop_app"])
+                    self.state = {"account_quota": quota, "updated_at": time.time(), "error": None, "basis": quota["basis"]}
+                except Exception as exc:
+                    self.state["error"] = str(exc) if isinstance(exc, ValueError) else "本机额度读取失败"
+                self.write("state.json", self.state)
+                return self.snapshot()
+            if self.config["source"] == "manual_quota" or self.config["source"] == "desktop_quota" and self.config["quota_mode"] == "manual":
                 # Manual values retain their entry time; polling must not make them look fresh.
                 if not self.state.get("updated_at") and self.config["quota_remaining"] is not None:
                     self.state = {"updated_at": time.time(), "basis": "手动记录 · 不自动扣减或重置"}
@@ -280,13 +324,14 @@ class Monitor:
                 return self.snapshot()
             if self.config["source"] == "jev":
                 return self.snapshot()
-            if not self.config["api_key"] and self.config["source"] != "manual":
+            if not self.config["api_key"] and self.config["source"] not in ("manual", "aliyun", "app_bridge"):
                 return self.snapshot()
             if self.last_attempt and time.monotonic() - self.last_attempt < 60:
                 return self.snapshot()
             self.last_attempt = time.monotonic()
             try:
                 payload = (
+                    read_harness_balance() if self.config["source"] == "app_bridge" else
                     self.fetch(self.config["api_key"]) if self.config["source"] == "deepseek" else query(self.config)
                 )
                 rows = parse_balance(payload)
@@ -300,7 +345,8 @@ class Monitor:
                 self.state = {
                     "balances": rows,
                     "is_available": payload["is_available"],
-                    "updated_at": time.time(),
+                    "updated_at": payload.get("observed_at", time.time()),
+                    "wallet_breakdown": payload.get("wallet_breakdown"),
                     "error": None,
                     "day": day,
                     "basis": payload.get("basis", "官方账户余额"),
@@ -310,6 +356,10 @@ class Monitor:
                 self.write("state.json", self.state)
             except Exception as exc:
                 self.state["error"] = str(exc) if isinstance(exc, ValueError) else "查询或保存失败，请稍后再试"
+                try:
+                    self.write("state.json", self.state)
+                except OSError:
+                    pass
                 return self.snapshot()
             snapshot = self.snapshot()
             row = snapshot["selected"]

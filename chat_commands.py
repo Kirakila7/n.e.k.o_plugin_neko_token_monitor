@@ -6,7 +6,15 @@ def balance_answer(state):
     source = config.get("source")
     model = config.get("model") or "当前模型"
 
-    if source == "manual_quota":
+    if source == "desktop_quota" and config.get("quota_mode", "auto") == "auto":
+        row = state.get("account_quota") or {}
+        if row.get("remaining") is None:
+            return f"暂时读不到 {model} 的猫粮积分喵～请打开应用的积分用量页，并检查猫粮额度读取组件的辅助功能权限；也可在账户设置中切换手动校正。"
+        prefix = "上次记录的" if state.get("stale") else "本机面板显示"
+        suffix = "；本次读取失败，不能当作当前额度" if state.get("stale") else "；以应用最新账单为准"
+        return f"{prefix} {model} 猫粮余额：{row['remaining']:g} 积分{suffix}喵～"
+
+    if source == "manual_quota" or source == "desktop_quota":
         remaining = config.get("quota_remaining")
         if remaining is None:
             return "猫粮的手动额度还没填写喵～打开猫粮监测功能，在设置里填写后就能查看。"

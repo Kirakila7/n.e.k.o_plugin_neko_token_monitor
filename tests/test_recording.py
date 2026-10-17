@@ -94,3 +94,19 @@ def test_unreadable_records_are_not_overwritten(tmp_path):
     r = recording.Recording(tmp_path)
     assert r.action("start")["error"]
     assert r.path.read_text() == "damaged"
+
+
+def test_chase_game_events_persist_without_changing_interaction_counts(tmp_path):
+    r = recording.Recording(tmp_path)
+    session = r.action('start')['id']
+    r.action('game', 'round-1-1', session, kind='catch')
+    r.action('game', 'round-1-1', session, kind='catch')
+    r.action('game', 'return-1', session, kind='rescue')
+    r.action('end')
+    restarted = recording.Recording(tmp_path)
+    assert restarted.snapshot()['game_totals'] == {'catches': 1, 'rescues': 1}
+    assert restarted.snapshot()['totals']['pet'] == 0
+    assert restarted.snapshot()['totals']['ask'] == 0
+    assert '追到' not in restarted.snapshot()['summary']
+    restarted.action('game', 'late-catch', session, kind='catch')
+    assert recording.Recording(tmp_path).snapshot()['game_totals']['catches'] == 2

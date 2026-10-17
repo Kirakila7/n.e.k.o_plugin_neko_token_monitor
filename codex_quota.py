@@ -74,7 +74,7 @@ def read_quota():
             except queue.Empty:
                 break
             if message is None:
-                break
+                raise ValueError("Codex 额度服务提前退出，请检查本机登录状态与运行权限")
             if message.get("id") == identifier:
                 if "error" in message:
                     raise ValueError("无法读取 Codex 额度，请确认本机 Codex 已登录")
@@ -82,10 +82,10 @@ def read_quota():
         raise ValueError("Codex 额度查询超时")
 
     try:
-        send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "catfood_quota", "version": "0.7.2"}}})
+        send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "catfood_quota", "version": "0.8.24"}}})
         receive(1)
         send({"method": "initialized"})
-        send({"id": 2, "method": "account/rateLimits/read"})
+        send({"id": 2, "method": "account/rateLimits/read", "params": {}})
         return normalize(receive(2))
     finally:
         process.terminate()

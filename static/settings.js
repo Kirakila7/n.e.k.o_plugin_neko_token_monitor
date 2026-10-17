@@ -1,20 +1,31 @@
 const panel=document.getElementById('accountPanel');
 panel.innerHTML=`<header><div><small>YUI · 猫粮</small><h2>猫粮余额</h2></div><button id="closeAccount" type="button" aria-label="返回人物">×</button></header>
-<p class="note">各平台分别记录，不合并余额。选择卡片设置，点「气泡展示」切换挂件喵～</p><label>查找模型或平台<input id="profileSearch" type="search" placeholder="例如 GPT、Claude、Gemini"></label><div id="quotaCards"></div>
-<form id="accountForm"><h3 id="editingName">账户设置</h3><p id="sourceHint" class="note"></p>
+<p class="note">各平台分别记录，不合并余额。选择卡片设置，点「气泡展示」切换挂件喵～</p><label>查找模型或平台<input id="profileSearch" type="search" placeholder="例如 WorkBuddy、TRAE、Kimi、Qwen"></label><div id="quotaCards"></div>
+<form id="accountForm"><h3 id="editingName">账户设置</h3><p id="sourceHint" class="note"></p><button id="accountTopup" type="button">补充猫粮 ↗</button>
 <label>模型备注<input id="model" maxlength="100" placeholder="可填写具体模型或套餐名称"></label>
 <label id="keyLabel">查询密钥（留空保留此平台的密钥）<input id="accountKey" type="password" autocomplete="new-password"></label>
+<div id="bridgeFields"><p class="note">在 DeepSeek Harness 安装并启用「猫粮余额桥接」后，保持 Harness 运行，即可读取当前登录账户的充值余额和赠金。无需复制 API Key 或登录凭据。应用内充值由 Harness 的原生窗口处理。</p><p id="bridgeWallets" class="note"></p></div>
+<div id="desktopFields"><label>积分来源<select id="quota_mode"><option value="auto">自动读取本机用量页（macOS）</option><option value="manual">手动校正积分</option></select></label><p class="note">在对应应用打开积分用量页后刷新。自动读取需要系统辅助功能授权给猫粮额度读取组件，只读取额度面板，不自动打开应用或签到。面板关闭、应用未运行或权限不足时保留上次读数，不当成 0。WorkBuddy 的面板兼容性尚待真实客户端验证。</p><label id="desktopTotalLabel">猫粮参考总积分（可选）<input id="desktop_total" type="number" min="0" max="1000000000000" step="any"><small>总积分由你设定，用于脸色与追逐比例；不把历史已过期积分计为本期总额。</small></label></div>
+<div id="aliyunFields"><label>阿里云 CLI 配置名（可选）<input id="aliyun_profile" maxlength="80" placeholder="留空使用默认配置"></label><p class="note">需要已安装并登录阿里云官方 CLI，RAM 身份仅需 bss:DescribeAcccount 查询权限。此处显示账户共享可用额度（可能含授信），并非 Qwen 聊天积分或百炼某模型免费 Token；不需要填写 DashScope 模型 Key。</p></div>
 <div id="customFields"><label>余额接口（HTTPS GET）<input id="endpoint" type="url"></label><label>金额字段路径<input id="value_path" placeholder="data.balance"></label><p class="note">密钥仅以 Bearer 认证发给此地址，请确认服务商。</p></div>
-<div id="quotaFields"><p class="note">此来源尚未接入自动额度查询。按平台页面填写；不会自动扣减或重置。</p><label>剩余额度<input id="quota_remaining" type="number" min="0" max="1000000000000" step="any"></label><label>总额度（可选）<input id="quota_total" type="number" min="0" max="1000000000000" step="any"></label><label>单位<select id="quota_unit"><option>次</option><option>token</option><option>%</option></select></label><label>重置时间备注（可选）<input id="quota_reset" maxlength="80" placeholder="例如：周五 20:00"></label></div>
+<div id="quotaFields"><p class="note">此来源尚未接入自动额度查询。按平台页面填写；不会自动扣减或重置。填写 Token 总额度或自设预算后，YUI 会在剩余 75%、50%、25% 时逐渐阴沉喵～</p><label>剩余额度<input id="quota_remaining" type="number" min="0" max="1000000000000" step="any"></label><label>猫粮总额度／预算（可选，同单位）<input id="quota_total" type="number" min="0" max="1000000000000" step="any"></label><label>单位<select id="quota_unit"><option>次</option><option>token</option><option>%</option></select></label><label>重置时间备注（可选）<input id="quota_reset" maxlength="80" placeholder="例如：周五 20:00"></label></div>
+<label id="balanceTotalLabel">猫粮参考总额（可选，同币种）<input id="balance_total" type="number" min="0" max="1000000000000" step="any"><small>用于计算剩余比例和 YUI 脸色，不会自动扣减。</small></label>
 <div id="budgetFields"><label>预算金额<input id="budget" type="number" min="0" max="1000000000" step="any"></label><label id="dateLabel">预算起始日期（UTC）<input id="budget_start" type="date"></label></div>
 <label id="currencyLabel">币种<select id="currency"><option>CNY</option><option>USD</option></select></label>
 <details id="estimateFields"><summary>估算与提醒</summary><label>每百万 token 综合价格（选填）<input id="price_per_million" type="number" min="0.000001" step="any"></label><label>低余额提醒阈值<input id="low_balance" type="number" min="0" step="any"></label><label><input id="alerts" type="checkbox"> 低余额提醒喵～</label></details><label id="intervalLabel">查询间隔（秒）<input id="interval" type="number" min="60" max="86400"></label>
 <button id="saveAccount" class="primary" type="submit">保存并展示</button><p id="accountFeedback" role="status"></p><p class="note">密钥保存在本机。API 预算、订阅额度和账户余额是不同指标；共享账户金额不代表某个模型的独立额度。</p></form>`;
 const field=id=>document.getElementById(id);
-const configFields=['model','endpoint','value_path','budget','budget_start','currency','price_per_million','low_balance','interval','quota_remaining','quota_total','quota_unit','quota_reset'];
+const creditOption=document.createElement('option');creditOption.textContent='积分';field('quota_unit').append(creditOption);
+// The per-account reminder switch also applies to points and manual quota sources.
+field('estimateFields').after(field('alerts').closest('label'));
+const configFields=['model','endpoint','value_path','budget','balance_total','budget_start','currency','price_per_million','low_balance','interval','quota_remaining','quota_total','quota_unit','quota_reset','quota_mode','aliyun_profile'];
 let accountCsrf='',profileRows=[],editingProfile='';
+function desktopVisibility(){const row=profileRows.find(r=>r.id===editingProfile),desktop=row?.source==='desktop_quota';field('quotaFields').hidden=desktop?field('quota_mode').value!=='manual':row?.source!=='manual_quota';field('desktopTotalLabel').hidden=!desktop||field('quota_mode').value==='manual';}
+field('quota_mode').onchange=()=>{if(field('quota_mode').value==='manual')field('quota_total').value=field('desktop_total').value;else field('desktop_total').value=field('quota_total').value;desktopVisibility();};
+field('accountTopup').onclick=()=>window.CatfoodTopUp.open(editingProfile);
 function quotaSummary(s){
- if(s.config.source==='manual_quota'){const c=s.config;return c.quota_remaining===null?'未填写':`${c.quota_remaining.toLocaleString()} ${c.quota_unit}`;}
+ if(s.config.source==='desktop_quota'&&s.config.quota_mode!=='manual')return s.account_quota?.remaining!=null?s.account_quota.remaining.toLocaleString()+' 积分':'待读取';
+ if(s.config.source==='manual_quota'||s.config.source==='desktop_quota'){const c=s.config;return c.quota_remaining===null?'未填写':`${c.quota_remaining.toLocaleString()} ${c.quota_unit}`;}
  if(s.config.source==='codex'){const w=s.codex_quota?.windows||[];return w.length?w.map(x=>`${x.label} ${x.remaining}%`).join(' · '):'待查询';}
  if(s.config.source==='jev'){const u=s.reported_usage||{};return `${((u.input_tokens||0)+(u.output_tokens||0)).toLocaleString()} token`;}
  return s.selected?`${s.selected.currency==='USD'?'$':'¥'} ${Number(s.selected.balance).toFixed(2)}`:s.configured?'待查询':'未连接';
@@ -23,10 +34,14 @@ function fillProfile(id){
  const row=profileRows.find(r=>r.id===id);if(!row)return;editingProfile=id;const c=row.snapshot.config,s=c.source;
  field('editingName').textContent=row.name+' · 设置';field('sourceHint').textContent=row.hint+({openai:'。需要组织 Admin Key；非 ChatGPT 订阅额度。',anthropic:'。需要组织费用查询权限；不含 Priority Tier。',codex:'。读取本机已登录的 Codex，无需密钥。',openrouter:'。需要 Management Key；不是普通聊天 Key。',jev:'。仅本机 JEV 桥接上报，不代表完整账户用量。'}[s]||'');
  for(const id of configFields)field(id).value=c[id]??'';field('alerts').checked=c.alerts;field('accountKey').value='';
- field('keyLabel').hidden=['codex','jev','manual','manual_quota'].includes(s);field('customFields').hidden=s!=='custom';field('quotaFields').hidden=s!=='manual_quota';field('budgetFields').hidden=!['openai','anthropic','manual'].includes(s);field('dateLabel').hidden=s==='manual';
- const nonMoney=['codex','jev','manual_quota'].includes(s);field('currencyLabel').hidden=nonMoney;field('estimateFields').hidden=nonMoney;field('intervalLabel').hidden=['jev','manual','manual_quota'].includes(s);
- field('currency').disabled=['openai','anthropic','openrouter','siliconflow'].includes(s);if(['openai','anthropic','openrouter'].includes(s))field('currency').value='USD';if(s==='siliconflow')field('currency').value='CNY';
+ field('keyLabel').hidden=['codex','jev','manual','manual_quota','desktop_quota','aliyun','app_bridge'].includes(s);field('customFields').hidden=s!=='custom';field('quotaFields').hidden=s!=='manual_quota';field('budgetFields').hidden=!['openai','anthropic','manual'].includes(s);field('dateLabel').hidden=s==='manual';field('balanceTotalLabel').hidden=['codex','jev','manual_quota','desktop_quota','openai','anthropic'].includes(s);
+ field('bridgeFields').hidden=s!=='app_bridge';field('bridgeWallets').textContent=Object.entries(row.snapshot.wallet_breakdown||{}).map(([currency,w])=>`${currency} · 充值余额 ${Number(w.normal).toLocaleString('zh-CN',{maximumFractionDigits:8})} · 赠金 ${Number(w.bonus).toLocaleString('zh-CN',{maximumFractionDigits:8})}`).join(' ｜ ');
+ field('desktopFields').hidden=s!=='desktop_quota';field('aliyunFields').hidden=s!=='aliyun';field('desktop_total').value=c.quota_total??'';field('quota_mode').value=c.quota_mode||'auto';desktopVisibility();
+ const nonMoney=['codex','jev','manual_quota','desktop_quota'].includes(s);field('currencyLabel').hidden=nonMoney;field('estimateFields').hidden=nonMoney;field('intervalLabel').hidden=['jev','manual','manual_quota'].includes(s);
+ field('currency').disabled=['openai','anthropic','openrouter','siliconflow','moonshot_cn','moonshot_global'].includes(s);if(['openai','anthropic','openrouter','moonshot_global'].includes(s))field('currency').value='USD';if(['siliconflow','moonshot_cn'].includes(s))field('currency').value='CNY';
+ if(['moonshot_cn','moonshot_global'].includes(s))field('sourceHint').textContent+='。使用对应站点开放平台 API Key，会员和 Kimi Code Key 不通用。';
  field('accountFeedback').textContent='';
+ field('accountTopup').disabled=!row.topup?.entries?.length;field('accountTopup').title=row.topup?.entries?.length?'打开此平台的官方充值或套餐入口':row.topup?.hint||'尚无已核验的官方入口';
 }
 function drawCards(state){
  profileRows=state.profiles||[];const container=field('quotaCards');container.replaceChildren();
@@ -35,20 +50,23 @@ function drawCards(state){
   const card=document.createElement('article');card.className='quota-card';card.classList.toggle('selected',state.profile===row.id);
   const name=document.createElement('strong');name.textContent=row.name;
   const amount=document.createElement('b');amount.textContent=row.enabled?quotaSummary(row.snapshot):'未接入';
-  const note=document.createElement('small');const manual=row.source==='manual_quota';note.textContent=row.hint+(row.enabled&&row.snapshot.error?' · 查询失败，保留旧数据':row.enabled&&row.snapshot.stale&&!manual&&row.source!=='jev'?' · 等待更新':'');
+  const note=document.createElement('small');const manual=row.source==='manual_quota'||row.source==='desktop_quota'&&row.snapshot.config.quota_mode==='manual';note.textContent=(row.source==='desktop_quota'?(manual?'手动校正积分 · 不自动扣减':'本机用量页读取 · macOS · 需保持额度页可读取'):row.hint)+(row.enabled&&row.snapshot.error?' · 查询失败，保留旧数据':row.enabled&&row.snapshot.stale&&!manual&&row.source!=='jev'?' · 等待更新':'');
   const stamp=document.createElement('small');stamp.textContent=row.snapshot.updated_at?'更新于 '+new Date(row.snapshot.updated_at*1000).toLocaleString('zh-CN'):'';
   const edit=document.createElement('button');edit.type='button';edit.textContent=row.enabled?'设置':'接入 / 记录';edit.onclick=()=>{fillProfile(row.id);field('accountForm').scrollIntoView({block:'start'});};
   card.append(name,amount);
   const snap=row.snapshot,c=snap.config;
-  const percentages=c.source==='codex'?(snap.codex_quota?.windows||[]).map(w=>({label:w.label,value:w.remaining,reset:'重置 '+new Date(w.resets_at*1000).toLocaleString('zh-CN')})):c.source==='manual_quota'&&c.quota_remaining!==null&&(c.quota_unit==='%'||c.quota_total>0)?[{label:'手动剩余',value:c.quota_unit==='%'?c.quota_remaining:c.quota_remaining/c.quota_total*100,reset:c.quota_reset?'重置备注 '+c.quota_reset:''}]:[];
+  const q=window.CatfoodQuotaMood.quota(snap);
+  const percentages=c.source==='codex'?(snap.codex_quota?.windows||[]).map(w=>({label:w.label,value:w.remaining,reset:'重置 '+new Date(w.resets_at*1000).toLocaleString('zh-CN')})):q?[{label:manual?'手动剩余':q.basis,value:q.percent,reset:c.quota_reset?'重置备注 '+c.quota_reset:''}]:[];
   if(row.enabled)for(const q of percentages){const label=document.createElement('small');label.textContent=q.label+' · '+q.value.toFixed(1)+'%';const bar=document.createElement('progress');bar.max=100;bar.value=q.value;bar.setAttribute('aria-label',q.label+'剩余百分比');card.append(label,bar);if(q.reset){const reset=document.createElement('small');reset.textContent=q.reset;card.append(reset);}}
   card.append(note,stamp,edit);
+  const topup=document.createElement('button');topup.type='button';topup.textContent='补充猫粮 ↗';topup.disabled=!row.topup?.entries?.length;topup.title=topup.disabled?(row.topup?.hint||'尚无已核验的官方入口'):'官方充值或套餐入口';topup.onclick=()=>window.CatfoodTopUp.open(row.id,row.name);card.append(topup);
   if(row.enabled){const show=document.createElement('button');show.type='button';show.textContent=state.profile===row.id?'正在展示':'气泡展示';show.onclick=async()=>{try{const r=await fetch('/api/select',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':accountCsrf},body:JSON.stringify({profile:row.id})});if(!r.ok)throw Error('切换失败');drawCards(await r.json());if(typeof update==='function')update();}catch(e){field('accountFeedback').textContent=e.message;}};card.append(show);}
   card.dataset.search=(row.name+' '+row.id).toLowerCase();card.hidden=!card.dataset.search.includes(field('profileSearch').value.trim().toLowerCase());container.append(card);
  }
 }
 field('profileSearch').oninput=()=>{for(const card of field('quotaCards').children)card.hidden=!card.dataset.search.includes(field('profileSearch').value.trim().toLowerCase());};
+window.addEventListener('catfood:statusrefresh',e=>drawCards(e.detail));
 window.openAccount=async()=>{panel.hidden=false;try{const r=await fetch('/api/status');if(!r.ok)throw Error();const s=await r.json();accountCsrf=s.csrf;drawCards(s);fillProfile(s.profile);}catch{field('accountFeedback').textContent='插件未连接，请稍后重试喵～';}};
 field('closeAccount').onclick=()=>{panel.hidden=true;};
-field('accountForm').onsubmit=async e=>{e.preventDefault();field('saveAccount').disabled=true;try{const body={profile:editingProfile,api_key:field('accountKey').value,alerts:field('alerts').checked};for(const id of configFields)body[id]=field(id).value;const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':accountCsrf},body:JSON.stringify(body)});const s=await r.json();if(!r.ok)throw Error(s.error||'保存失败');field('accountKey').value='';drawCards(s);field('accountFeedback').textContent=s.error?'已保存；'+s.error:'已保存并切换气泡展示喵～';if(typeof update==='function')update();}catch(e){field('accountFeedback').textContent=e.message;}finally{field('saveAccount').disabled=false;}};
+field('accountForm').onsubmit=async e=>{e.preventDefault();field('saveAccount').disabled=true;try{const body={profile:editingProfile,api_key:field('accountKey').value,alerts:field('alerts').checked};for(const id of configFields)body[id]=field(id).value;if(profileRows.find(r=>r.id===editingProfile)?.source==='desktop_quota'&&body.quota_mode==='auto')body.quota_total=field('desktop_total').value;const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':accountCsrf},body:JSON.stringify(body)});const s=await r.json();if(!r.ok)throw Error(s.error||'保存失败');field('accountKey').value='';drawCards(s);field('accountFeedback').textContent=s.error?'已保存；'+s.error:'已保存并切换气泡展示喵～';if(typeof update==='function')update();}catch(e){field('accountFeedback').textContent=e.message;}finally{field('saveAccount').disabled=false;}};
 setInterval(async()=>{if(panel.hidden||!accountCsrf)return;try{const r=await fetch('/api/status');if(r.ok)drawCards(await r.json());}catch{}},15000);

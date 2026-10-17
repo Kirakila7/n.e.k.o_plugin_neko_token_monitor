@@ -6,6 +6,8 @@ from decimal import Decimal
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .aliyun_balance import query as query_aliyun
+
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -47,6 +49,22 @@ def query(cfg, request=read_json):
     if source == "manual":
         value = money(cfg["budget"])
         basis = "手动填写 · 不自动扣减"
+    elif source in ("moonshot_cn", "moonshot_global"):
+        host = "api.moonshot.cn" if source == "moonshot_cn" else "api.moonshot.ai"
+        payload = request("https://" + host + "/v1/users/me/balance", {"Authorization": "Bearer " + cfg["api_key"]})
+        if payload.get("status") is not True or type(payload.get("code")) is not int or payload["code"] != 0:
+            raise ValueError("Kimi 开放平台余额查询失败")
+        value = money(payload["data"]["available_balance"])
+        basis = "Kimi 开放平台可用余额 · 含可用代金券 · 非 Kimi 会员或 Code 套餐"
+    elif source == "aliyun":
+        payload = query_aliyun(cfg.get("aliyun_profile", ""))
+        data = payload["Data"]
+        if payload.get("Success") is not True or data["Currency"] not in ("CNY", "USD"):
+            raise ValueError("阿里云余额数据无效")
+        value = money(data["AvailableAmount"].replace(',', '') if isinstance(data["AvailableAmount"], str) else data["AvailableAmount"])
+        if data["Currency"] != cfg["currency"]:
+            raise ValueError("账户返回币种与设置不一致，请切换币种后重试")
+        basis = "阿里云账户共享可用额度（含授信）· 非 Qwen 积分或百炼免费 Token"
     elif source in ("openrouter", "siliconflow"):
         url = (
             "https://openrouter.ai/api/v1/credits"

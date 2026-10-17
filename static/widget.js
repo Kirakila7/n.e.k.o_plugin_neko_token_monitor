@@ -1,8 +1,114 @@
 const el=id=>document.getElementById(id);let state=null,csrf='',talk=false,timer=null,quipIndex=0,mode=localStorage.getItem('neko-budget-mode')||'balance';
-function native(action){const bridge=window.webkit?.messageHandlers?.nekoWidget;if(bridge){bridge.postMessage(action);return true;}if(window.chrome?.webview){window.chrome.webview.postMessage(action);return true;}return false;}
-let agentState='unknown',idleCard=false;
-function render(){if(!state)return;if(state.config.source==='manual_quota'){const c=state.config;el('heading').textContent='猫粮余额';el('amount').classList.remove('idle-label');el('amount').textContent=c.quota_remaining===null?'未填写':c.quota_remaining.toLocaleString()+' '+c.quota_unit;el('detail').textContent=(c.model||'额度')+' · 手动记录';el('connection').textContent=(c.quota_total!==null?'总额度 '+c.quota_total+' '+c.quota_unit+'\n':'')+(c.quota_reset?'重置备注 '+c.quota_reset:'不会自动扣减或重置');return;}if(state.config.source==='codex'){const windows=state.codex_quota?.windows||[];const w=windows.length?[...windows].sort((a,b)=>a.remaining-b.remaining)[0]:null;el('heading').textContent='猫粮余额';el('amount').classList.remove('idle-label');el('amount').textContent=w?w.remaining+'%':'待查询';el('detail').textContent=w?(state.stale?'上次数据 · ':'')+'Codex '+w.label+'剩余':'Codex 套餐额度';el('connection').textContent=state.error||(w?'重置 '+new Date(w.resets_at*1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})+'\n'+windows.filter(x=>x!==w).map(x=>x.label+'剩余 '+x.remaining+'%').join('；'):'正在查询喵～');return;}if(state.config.source==='jev'){const u=state.reported_usage||{};el('heading').textContent='猫粮余额';el('amount').textContent='未提供';el('amount').classList.remove('idle-label');el('detail').textContent='JEV 已记录 '+((u.input_tokens||0)+(u.output_tokens||0)).toLocaleString()+' token';el('connection').textContent='输入 '+(u.input_tokens||0)+' · 输出 '+(u.output_tokens||0)+'\n仅本机上报用量';return;}el('amount').classList.remove('idle-label');const row=state.selected;const sym=row?.currency==='USD'?'$':'¥';el('heading').textContent=mode==='token'?'估算可用 token':'猫粮余额';el('amount').textContent=mode==='token'?(state.estimated_tokens===null?'待估算':'≈ '+new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:1}).format(state.estimated_tokens)):(row?sym+' '+Number(row.balance).toFixed(2):state.configured?'待查询':'未连接');el('detail').textContent=mode==='token'?'按自填单价估算':row?(state.stale?'旧数据 · ':'')+state.basis:'点击 ≡ 设置账户';el('connection').textContent=state.error?'查询失败\n保留上次结果':state.stale&&row?'上次数据\n等待更新':'';}
-function renderAgentCard(){if(talk||!state)return;if(idleCard&&mode==='balance'){el('heading').textContent='当前时间段为：';el('amount').textContent=agentState==='idle'?'空闲时段':agentState==='busy'?'忙碌时段':'状态未连接';el('amount').classList.toggle('idle-label',agentState==='idle');el('detail').textContent=agentState==='idle'?'Agent 没在忙，本喵陪你喵～':agentState==='busy'?'Agent 正在工作喵～':'暂时读不到 Agent 状态';}else render();}
+const browserPreview=!window.webkit?.messageHandlers?.nekoWidget&&!window.chrome?.webview;
+if(browserPreview)document.body.classList.add('browser-preview');
+let companionPosition=null;
+if(browserPreview){try{const saved=JSON.parse(localStorage.getItem('catfood-companion-position'));if(saved&&Number.isFinite(saved.x)&&Number.isFinite(saved.y))companionPosition={x:Math.max(0,Math.min(1,saved.x)),y:Math.max(0,Math.min(1,saved.y))};}catch{}}
+function placeCompanion(x,y){
+ const group=el('companion'),scale=Number(document.documentElement.style.getPropertyValue('--companion-scale'))||1;
+ const halfWidth=group.offsetWidth*scale/2,halfHeight=group.offsetHeight*scale/2;
+ const cx=Math.max(halfWidth+8,Math.min(window.innerWidth-halfWidth-8,x));
+ const cy=Math.max(halfHeight+8,Math.min(window.innerHeight-halfHeight-8,y));
+ group.style.left=cx+'px';group.style.top=cy+'px';
+ return {x:cx/window.innerWidth,y:cy/window.innerHeight};
+}
+function fitCompanion(){const height=Math.max(450,382+el('recordBar').offsetHeight+8);el('companion').style.height=height+'px';const available=Math.max(1,window.innerHeight-(browserPreview?16:0));document.documentElement.style.setProperty('--companion-scale',String(Math.min(1,available/height)));if(browserPreview)placeCompanion((companionPosition?.x??.5)*window.innerWidth,(companionPosition?.y??.5)*window.innerHeight);}
+fitCompanion();window.addEventListener('resize',fitCompanion);
+if(window.ResizeObserver)new ResizeObserver(fitCompanion).observe(el('recordBar'));
+let recordBarVisible=true;
+try{recordBarVisible=localStorage.getItem('catfood-record-bar-visible')!=='false';}catch{}
+function setRecordBarVisible(visible,persist=true){
+ recordBarVisible=visible;el('recordBar').hidden=!visible;
+ const toggle=el('recordVisibilityToggle');toggle.setAttribute('aria-checked',String(visible));
+ if(!visible)el('historyPanel').hidden=true;
+ if(persist){try{localStorage.setItem('catfood-record-bar-visible',String(visible));}catch{}}
+ fitCompanion();
+}
+el('recordVisibilityToggle').onclick=()=>setRecordBarVisible(!recordBarVisible);
+setRecordBarVisible(recordBarVisible,false);
+function native(action){const bridge=window.webkit?.messageHandlers?.nekoWidget;if(bridge){bridge.postMessage(action==='recordStart'?{action,session_id:recordingState?.id}:action);return true;}if(window.chrome?.webview){window.chrome.webview.postMessage(action);return true;}return false;}
+let agentState='unknown',agentData=null,idleCard=false;
+const wardrobe=window.CatfoodWardrobe;
+let outfitMode='auto',fixedOutfit='original',requestedOutfit=null,outfitRevision=0;
+try{const saved=JSON.parse(localStorage.getItem('catfood-wardrobe'));if(saved){if(['auto','profile','fixed'].includes(saved.mode))outfitMode=saved.mode;if(wardrobe.outfits[saved.fixed])fixedOutfit=saved.fixed;}}catch{}
+el('outfitFollow').value=outfitMode;
+function saveOutfitPreference(){try{localStorage.setItem('catfood-wardrobe',JSON.stringify({mode:outfitMode,fixed:fixedOutfit}));}catch{}}
+function updateCostume(){
+ const choice=wardrobe.resolve(state,agentData,outfitMode,fixedOutfit),outfit=wardrobe.outfits[choice.key];
+ el('outfitContext').textContent=choice.reason+(choice.model?' · '+choice.model:'')+' · '+outfit.style;
+ for(const button of el('outfitChoices').children){const selected=button.dataset.outfit===choice.key;button.classList.toggle('selected',selected);button.setAttribute('aria-pressed',String(selected));}
+ if(requestedOutfit===choice.key)return;
+ requestedOutfit=choice.key;const revision=++outfitRevision,image=el('character').querySelector('img'),preload=new Image();
+ preload.onload=()=>{if(revision!==outfitRevision)return;image.src=outfit.image;image.alt='YUI 穿着 '+outfit.name+' 的'+outfit.style;el('character').dataset.outfit=choice.key;el('character').dataset.outfitChangedAt=String(Date.now());};
+ preload.onerror=()=>{if(revision!==outfitRevision)return;image.src='/yui-chibi.png';image.alt='YUI 原装';el('character').dataset.outfit='original';el('outfitContext').textContent='服装暂未载入，已恢复 YUI 原装';requestedOutfit=null;};
+ preload.src=outfit.image;
+}
+for(const [key,outfit] of Object.entries(wardrobe.outfits)){
+ const button=document.createElement('button');button.type='button';button.dataset.outfit=key;button.setAttribute('aria-label','穿上 '+outfit.name+' · '+outfit.style);
+ const image=document.createElement('img');image.src=outfit.image;image.alt='';image.loading='lazy';image.draggable=false;
+ const label=document.createElement('strong');label.textContent=outfit.name;const style=document.createElement('small');style.textContent=outfit.style;
+ button.append(image,label,style);button.onclick=()=>{fixedOutfit=key;outfitMode='fixed';el('outfitFollow').value=outfitMode;saveOutfitPreference();updateCostume();};el('outfitChoices').append(button);
+}
+el('outfitToggle').onclick=()=>{closeContextMenus();el('outfitPanel').hidden=false;el('historyPanel').hidden=true;updateCostume();};
+el('closeOutfits').onclick=()=>el('outfitPanel').hidden=true;
+el('outfitFollow').onchange=()=>{outfitMode=el('outfitFollow').value;saveOutfitPreference();updateCostume();};
+const quotaMood=window.CatfoodQuotaMood;
+const percentText=value=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1}).format(value)+'%';
+const tokenText=value=>new Intl.NumberFormat('zh-CN',{notation:value>=10000?'compact':'standard',maximumFractionDigits:1}).format(value);
+function renderQuotaMood(){
+ const q=quotaMood.quota(state),tier=quotaMood.tier(q?.percent),character=el('character');
+ character.dataset.mood=tier;
+ if(q)character.dataset.remainingPercent=String(q.percent);else delete character.dataset.remainingPercent;
+ const description=q?(q.stale?'上次数据 · ':'')+'猫粮剩余 '+percentText(q.percent)+' · '+quotaMood.labels[tier]:quotaMood.labels.unknown;
+ character.title=description+' · 右键打开人物设置';character.setAttribute('aria-label','摸摸猫娘，按住拖动，右键打开人物设置。'+description);
+ window.catfoodQuotaState=q;window.dispatchEvent(new CustomEvent('catfood:quota',{detail:q}));
+ return q;
+}
+function render(){
+ if(!state)return;
+ const c=state.config,q=quotaMood.quota(state);
+ el('heading').textContent='猫粮余额';el('amount').classList.remove('idle-label','token-amount');el('amount').title='';
+ if(c.source==='desktop_quota'&&c.quota_mode!=='manual'){
+  const remaining=state.account_quota?.remaining;
+  el('amount').textContent=remaining!=null?remaining.toLocaleString('zh-CN',{maximumFractionDigits:2})+' 积分':'待读取';
+  el('detail').textContent=(c.model||'本机应用')+' · '+(state.stale?'上次面板数据':'本机用量页读数')+(q?' · 参考剩余 '+percentText(q.percent):' · 未设置总积分');
+  el('connection').textContent=state.error||'以应用最新账单为准；总积分为自设参考';return;
+ }
+ if(c.source==='manual_quota'||c.source==='desktop_quota'){
+  const remaining=c.quota_remaining,hasValue=remaining!==null&&remaining!==undefined;
+  el('amount').classList.toggle('token-amount',c.quota_unit==='token'&&hasValue);
+  el('amount').textContent=hasValue?(c.quota_unit==='token'?tokenText(remaining):remaining.toLocaleString())+' '+c.quota_unit:'未填写';
+  el('amount').title=hasValue?remaining.toLocaleString()+' '+c.quota_unit:'';
+  el('detail').textContent=(c.model||'额度')+' · 手动记录'+(q?' · 剩余 '+percentText(q.percent):' · 未设置总额度');
+  el('connection').textContent=(c.quota_total!=null?'总额度 '+c.quota_total+' '+c.quota_unit+'\n':'')+(c.quota_reset?'重置备注 '+c.quota_reset:'不会自动扣减或重置');return;
+ }
+ if(c.source==='codex'){
+  const windows=state.codex_quota?.windows||[];
+  const w=windows.filter(x=>Number.isFinite(x.remaining)&&x.remaining>=0&&x.remaining<=100).sort((a,b)=>a.remaining-b.remaining)[0];
+  el('amount').textContent=w?percentText(w.remaining):'待查询';
+  el('detail').textContent=w?(state.stale?'上次数据 · ':'')+'Codex '+w.label+'剩余':'Codex 套餐额度';
+  el('connection').textContent=state.error||(w?'重置 '+new Date(w.resets_at*1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})+'\n'+windows.filter(x=>x!==w).map(x=>x.label+'剩余 '+x.remaining+'%').join('；'):'正在查询喵～');return;
+ }
+ if(c.source==='jev'){
+  const u=state.reported_usage||{};
+  el('amount').textContent='未提供';el('detail').textContent='JEV 已记录 '+((u.input_tokens||0)+(u.output_tokens||0)).toLocaleString()+' token';
+  el('connection').textContent='输入 '+(u.input_tokens||0)+' · 输出 '+(u.output_tokens||0)+'\n仅本机上报用量';return;
+ }
+ const row=state.selected,sym=row?.currency==='USD'?'$':'¥',estimated=state.estimated_tokens;
+ el('amount').classList.toggle('token-amount',mode==='token'&&estimated!=null);
+ el('amount').textContent=mode==='token'?(estimated==null?'待估算':'≈ '+tokenText(estimated)+' token'):(row?sym+' '+Number(row.balance).toFixed(2):state.configured?'待查询':'未连接');
+ el('amount').title=mode==='token'&&estimated!=null?'估算 '+estimated.toLocaleString()+' token':'';
+ el('detail').textContent=(mode==='token'?'按自填单价估算':row?(state.stale?'上次数据 · ':'')+state.basis:'右键气泡设置账户')+(q?' · 剩余 '+percentText(q.percent):row?' · 未设置总额':'');
+ el('connection').textContent=state.error?'查询失败\n保留上次结果':state.stale&&row?'上次数据\n等待更新':'';
+}
+function renderAgentCard(){
+ updateCostume();renderQuotaMood();if(talk||!state)return;
+ if(idleCard&&mode==='balance'){
+  const names=(agentData?.active_agents||[]).map(a=>a.name);
+  el('heading').textContent='当前 Agent：';el('amount').textContent=agentState==='busy'?(names.length===1?names[0]:names.length+' 个在工作'):agentState==='idle'?'空闲时段':'状态未连接';
+  el('detail').textContent=agentState==='busy'?(names.join('、')+' · 正在工作'):agentState==='idle'?'Agent 没在忙，本喵陪你喵～':'暂时读不到 Agent 状态';
+  el('amount').classList.toggle('idle-label',agentState==='idle');el('amount').classList.remove('token-amount');el('amount').title='';
+ }else render();
+}
 function say(text){talk=true;el('readout').hidden=true;el('quip').hidden=false;el('quip').textContent=text;el('quip').classList.remove('fade');void el('quip').offsetWidth;el('quip').classList.add('fade');clearTimeout(timer);timer=setTimeout(restore,4200);}
 function restore(){clearTimeout(timer);talk=false;el('quip').hidden=true;el('readout').hidden=false;renderAgentCard();}
 const quips=['哼，本喵在呢。\n碳基生物，安心忙吧喵～','猫粮本喵盯着，\n你记得按时吃饭喵～','才不是特意等你。\n只是这里待着舒服喵～','累了就歇一会。\n本喵又不会跑掉喵～','有事就叫本喵。\n别一个人硬撑喵～','又偷看本喵？\n好啦，陪你一会喵～'];
@@ -30,24 +136,101 @@ function bounce(id){
  clickAnimations.set(target,target.animate(frames,{duration:character?500:380,easing:'ease-out'}));
 }
 
-el('thought').onclick=()=>{recordAction('ask');bounce('thought');idleCard=!idleCard;mode='balance';localStorage.setItem('neko-budget-mode',mode);restore();};
+el('thought').onclick=e=>{if(e.button!==0||e.ctrlKey)return;recordAction('ask');bounce('thought');idleCard=!idleCard;mode='balance';localStorage.setItem('neko-budget-mode',mode);restore();};
 const petLines=['突、突然摸头干嘛……\n只许再摸一下喵～','哼，头发都被你揉乱了。\n……也没说不让你摸喵～','好啦，本喵在这里。\n今天也辛苦你了喵～','碳基生物，轻一点。\n本喵又不会跑喵～'];let petIndex=0;
-function pet(){recordAction("pet");bounce('character');bounce('thought');if(window.catfoodMusic?.pet())return;const lines=[...quips,...petLines];const line=lines[petIndex++%lines.length];say(line);requestSpokenLine(line);}
-let drag=false,start=null;el('character').onpointerdown=e=>{clickAnimations.get(el('character'))?.cancel();start={x:e.screenX,y:e.screenY};drag=false;el('character').setPointerCapture(e.pointerId);native('dragStart');};el('character').onpointermove=e=>{if(!start)return;if(Math.hypot(e.screenX-start.x,e.screenY-start.y)>4)drag=true;if(drag)native('dragMove');};el('character').onpointerup=()=>{native('dragEnd');start=null;if(drag)return;pet();};el('character').onpointercancel=()=>{start=null;native('dragEnd');};
-el('menuToggle').onclick=()=>el('menu').hidden=!el('menu').hidden;
-for(const [id,value] of [['balanceMode','balance'],['tokenMode','token']])el(id).onclick=()=>{mode=value;idleCard=false;localStorage.setItem('neko-budget-mode',mode);el('menu').hidden=true;restore();};
-el('settings').onclick=()=>{el('menu').hidden=true;openAccount();};
-async function update(refresh=false){try{const r=await fetch(refresh?'/api/refresh':'/api/status',refresh?{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'}:{});if(!r.ok)throw Error();state=await r.json();csrf=state.csrf||csrf;renderAgentCard();}catch{el('connection').textContent='插件连接中断';if(state){state.stale=true;state.estimated_tokens=null;render();el('connection').textContent='插件连接中断';}}}
-el('refreshNow').onclick=()=>{el('menu').hidden=true;update(true);};update();setInterval(()=>update(),15000);
+function pet(){recordAction("pet");bounce('character');bounce('thought');if(window.catfoodMusic?.pet())return;const lines=[...quips,...petLines];const line=lines[petIndex++%lines.length];say(line);if(!browserPreview)requestSpokenLine(line);}
+el('character').onclick=e=>{if(e.button===0&&!e.ctrlKey)pet();};
+let companionDrag=null,suppressDragClick=false;
+el('companion').addEventListener('pointerdown',e=>{
+ if(!e.isPrimary||e.button!==0||e.ctrlKey||companionDrag)return;
+ const handle=e.target.closest('#character,#thought,#recordBar,#historyPanel header,#outfitPanel header');
+ const control=e.target.closest('button,input,select,textarea,a');
+ if(control&&!['character','thought'].includes(control.id))return;
+ if(!handle&&e.target!==el('companion')&&e.target!==el('pet')&&!e.target.classList.contains('dot'))return;
+ const capture=handle||el('companion'),box=el('companion').getBoundingClientRect();
+ companionDrag={id:e.pointerId,capture,x:e.clientX,y:e.clientY,screenX:e.screenX,screenY:e.screenY,cx:box.left+box.width/2,cy:box.top+box.height/2,moved:false};
+ suppressDragClick=false;capture.setPointerCapture(e.pointerId);
+ if(!browserPreview)native('dragStart');
+});
+el('companion').addEventListener('pointermove',e=>{
+ const d=companionDrag;if(!d||e.pointerId!==d.id)return;
+ const dx=(browserPreview?e.clientX:e.screenX)-(browserPreview?d.x:d.screenX),dy=(browserPreview?e.clientY:e.screenY)-(browserPreview?d.y:d.screenY);
+ if(!d.moved&&Math.hypot(dx,dy)<=4)return;
+ if(!d.moved){d.moved=true;el('companion').classList.add('dragging');clickAnimations.get(el('character'))?.cancel();clickAnimations.get(el('thought'))?.cancel();}
+ e.preventDefault();
+ if(browserPreview)companionPosition=placeCompanion(d.cx+dx,d.cy+dy);else native('dragMove');
+});
+function endCompanionDrag(e){
+ const d=companionDrag;if(!d||e.pointerId!==d.id)return;
+ companionDrag=null;el('companion').classList.remove('dragging');
+ if(!browserPreview)native('dragEnd');
+ if(d.capture.hasPointerCapture(d.id))d.capture.releasePointerCapture(d.id);
+ if(d.moved){suppressDragClick=true;setTimeout(()=>{suppressDragClick=false;},0);if(browserPreview){try{localStorage.setItem('catfood-companion-position',JSON.stringify(companionPosition));}catch{}}}
+}
+for(const type of ['pointerup','pointercancel','lostpointercapture'])el('companion').addEventListener(type,endCompanionDrag);
+el('companion').addEventListener('click',e=>{if(suppressDragClick){e.preventDefault();e.stopImmediatePropagation();}},true);
+let contextMenuOwner=null;
+function closeContextMenus(restoreFocus=false){
+ for(const id of ['menu','quotaMenu'])el(id).hidden=true;
+ for(const id of ['character','thought'])el(id).setAttribute('aria-expanded','false');
+ if(restoreFocus)contextMenuOwner?.focus({preventScroll:true});
+}
+function openContextMenu(owner,event){
+ event?.preventDefault();if(document.body.classList.contains('record-finished'))return;
+ closeContextMenus();contextMenuOwner=owner;
+ const menu=el(owner.id==='thought'?'quotaMenu':'menu');menu.hidden=false;owner.setAttribute('aria-expanded','true');
+ const box=owner.getBoundingClientRect(),x=event?.clientX||box.left+box.width/2,y=event?.clientY||box.top+box.height/2;
+ menu.style.left=Math.max(8,Math.min(innerWidth-menu.offsetWidth-8,x))+'px';
+ menu.style.top=Math.max(8,Math.min(innerHeight-menu.offsetHeight-8,y))+'px';
+ menu.querySelector('button:not(:disabled)')?.focus({preventScroll:true});
+}
+for(const id of ['thought','character']){
+ const owner=el(id);owner.addEventListener('contextmenu',e=>openContextMenu(owner,e));
+ owner.addEventListener('keydown',e=>{if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){e.preventDefault();openContextMenu(owner);}});
+}
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('.contextMenu'))closeContextMenus();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeContextMenus(true);});
+window.addEventListener('blur',()=>closeContextMenus());window.addEventListener('resize',()=>closeContextMenus());
+for(const id of ['menu','quotaMenu']){
+ const menu=el(id);menu.addEventListener('click',e=>{if(e.target.closest('button'))closeContextMenus();});
+ menu.addEventListener('keydown',e=>{
+  const buttons=[...menu.querySelectorAll('button:not(:disabled)')],index=buttons.indexOf(document.activeElement);
+  if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){
+   e.preventDefault();const next=e.key==='Home'?0:e.key==='End'?buttons.length-1:(index+(e.key==='ArrowDown'?1:-1)+buttons.length)%buttons.length;buttons[next]?.focus();
+  }else if(e.key==='Tab')closeContextMenus();
+ });
+}
+for(const [id,value] of [['balanceMode','balance'],['tokenMode','token']])el(id).onclick=()=>{mode=value;idleCard=false;localStorage.setItem('neko-budget-mode',mode);closeContextMenus();restore();};
+el('settings').onclick=()=>{closeContextMenus();openAccount();};
+el('topupOpen').onclick=()=>{closeContextMenus();if(state?.profile)window.CatfoodTopUp.open(state.profile);};
+async function update(refresh=false){try{const r=await fetch(refresh?'/api/refresh':'/api/status',refresh?{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'}:{});if(!r.ok)throw Error();state=await r.json();window.catfoodQuotaOnline=true;window.catfoodQuotaReadAt=Date.now();csrf=state.csrf||csrf;renderAgentCard();}catch{window.catfoodQuotaOnline=false;el('connection').textContent='插件连接中断';if(state){state.stale=true;state.estimated_tokens=null;renderQuotaMood();render();el('connection').textContent='插件连接中断';}}}
+el('refreshNow').onclick=()=>{closeContextMenus();update(true);};update();setInterval(()=>update(),15000);
 
-el('yuiReply').onclick=async()=>{el('menu').hidden=true;try{const r=await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'});const result=await r.json();if(!r.ok||!result.submitted)throw Error(result.error||'原软件暂时没有接收');say('已经叫她啦喵～\n请看 NEKO 的回应。');el('connection').textContent='是否出声由原软件语音设置决定';}catch(e){say(e.message);}};
+el('yuiReply').onclick=async()=>{el('menu').hidden=true;if(browserPreview)return;try{const r=await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'});const result=await r.json();if(!r.ok||!result.submitted)throw Error(result.error||'原软件暂时没有接收');say('已经叫她啦喵～\n请看 NEKO 的回应。');el('connection').textContent='是否出声由原软件语音设置决定';}catch(e){say(e.message);}};
 
-async function pollAgent(){try{const r=await fetch('/api/agent');if(!r.ok)throw Error();const a=await r.json();agentState=['idle','busy'].includes(a.status)?a.status:'unknown';}catch{agentState='unknown';}el('agentStatus').textContent=agentState==='idle'?'空闲时段 · 喵～':agentState==='busy'?'Agent 运行中 · 本喵忙着喵～':'Agent 状态未连接';el('agentStatus').classList.toggle('idle',agentState==='idle');renderAgentCard();}
-pollAgent();setInterval(pollAgent,5000);
+let agentPollTimer=null,agentPollBusy=false,agentFingerprint='';
+function scheduleAgentPoll(){clearTimeout(agentPollTimer);agentPollTimer=setTimeout(pollAgent,document.hidden?5000:500);}
+async function pollAgent(){
+ if(agentPollBusy)return;
+ clearTimeout(agentPollTimer);agentPollBusy=true;
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),1500);
+ try{const r=await fetch('/api/agent',{signal:controller.signal});if(!r.ok)throw Error();agentData=await r.json();agentState=['idle','busy'].includes(agentData.status)?agentData.status:'unknown';}
+ catch{agentState='unknown';agentData=null;}
+ finally{clearTimeout(timeout);agentPollBusy=false;}
+ const fingerprint=JSON.stringify({status:agentState,agents:agentData?.active_agents||[]});
+ if(fingerprint!==agentFingerprint){
+  agentFingerprint=fingerprint;const names=(agentData?.active_agents||[]).map(a=>a.name);
+  el('agentStatus').textContent=agentState==='idle'?'空闲时段 · 喵～':agentState==='busy'?(names.join('、')+' 工作中 · 喵～'):'Agent 状态未连接';
+  el('agentStatus').classList.toggle('idle',agentState==='idle');renderAgentCard();
+ }
+ scheduleAgentPoll();
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)scheduleAgentPoll();else pollAgent();});
+pollAgent();
 
 async function requestSpokenLine(line){if(!csrf)return;try{const r=await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({line})});const result=await r.json();el('connection').textContent=r.ok&&result.submitted?'已请求原软件回应\n出声取决于语音状态':r.status===429?'语音稍等一下喵～':result.error||'原软件语音暂不可用';}catch{el('connection').textContent='原软件语音未连接';}}
 
-let recordingActive=false, recordingState=null, recordQueue=Promise.resolve(), exiting=false;
+let recordingActive=false, recordingState=null, recordQueue=Promise.resolve(), exiting=false,takeoverConfirmed=false;
 const lastStatusNotes=new Map();
 function noteStatus(kind,message){
  if(!recordingActive||exiting||!message||lastStatusNotes.get(kind)===message)return;
@@ -61,8 +244,10 @@ function renderRecording(d){
  if(recordingActive&&!d.active){window.dispatchEvent(new Event('catfood:recordend'));native('recordEnd');document.body.classList.add('record-inactive');}
  const newlyActive=!recordingActive&&!!d.active;
  recordingState=d;recordingActive=!!d.active;
- if(newlyActive){lastStatusNotes.clear();document.body.classList.remove('record-finished');noteStatus('agent',el('agentStatus').textContent);noteStatus('connection',el('connection').textContent);}
- el('exitRecord').textContent=recordingActive?'和猫娘一起玩':'开始记录模式';
+ window.dispatchEvent(new CustomEvent('catfood:recordsnapshot',{detail:d}));
+ if(newlyActive){takeoverConfirmed=false;lastStatusNotes.clear();document.body.classList.remove('record-finished');el('recordCounts').title='正在确认人物替换';restore();noteStatus('agent',el('agentStatus').textContent);noteStatus('connection',el('connection').textContent);}
+ el('exitRecord').textContent=browserPreview?'请在桌面挂件中操作':recordingActive?'和猫娘一起玩':'开始记录模式';
+ el('exitRecord').disabled=browserPreview;
  el('recordCounts').textContent=d.error||`本次摸头 ${d.pet||0} · 询问 ${d.ask||0} ｜累计摸头 ${d.totals?.pet||0} · 询问 ${d.totals?.ask||0}`;
  el('historyTotals').textContent=`共 ${d.totals?.sessions||0} 段记录，摸头 ${d.totals?.pet||0} 次，询问 ${d.totals?.ask||0} 次喵～`;
  el('memoryStatus').textContent=d.pending_memory?`${d.pending_memory} 段已保存在本机，等待写入 YUI 记忆；后台会重试喵～`:'已完成记录的记忆写入均已确认喵～';
@@ -77,46 +262,56 @@ async function sendRecord(body){
 }
 async function flushClicks(){for(const item of pendingClicks()){await sendRecord(item);savePending(pendingClicks().filter(x=>x.event_id!==item.event_id));}}
 function recordAction(action,details={}){
- if(['pet','ask','note'].includes(action)){
+ if(browserPreview&&action!=='status')return Promise.resolve(null);
+ if(['pet','ask','note','game'].includes(action)){
   if(!recordingActive||exiting)return Promise.resolve(null);
   const item={action,event_id:crypto.randomUUID(),session_id:recordingState.id,...details};savePending([...pendingClicks(),item]);
  }
- const work=async()=>{await flushClicks();return ['pet','ask','note'].includes(action)?recordingState:sendRecord({action});};
+ const work=async()=>{if(!browserPreview)await flushClicks();return ['pet','ask','note','game'].includes(action)?recordingState:sendRecord({action});};
  const result=recordQueue.then(work);recordQueue=result.catch(()=>{el('recordCounts').textContent='记录暂未同步，点击已暂存在本机，将自动重试喵～';});return result;
 }
 async function finishRecording(){
+ if(browserPreview)return;
  if(exiting)return;exiting=true;el('exitRecord').disabled=true;
  // Restore the original immediately even when the loopback server is unavailable.
- window.dispatchEvent(new Event('catfood:recordend'));native('recordEnd');document.body.classList.add('record-inactive','record-finished');el('historyPanel').hidden=true;el('menu').hidden=true;
+ window.dispatchEvent(new Event('catfood:recordend'));native('recordEnd');document.body.classList.add('record-inactive','record-finished');el('historyPanel').hidden=true;el('outfitPanel').hidden=true;closeContextMenus();
  try{const d=await recordAction('end');if(d?.summary){say(d.summary);clearTimeout(timer);el('connection').textContent=d.memory_saved?'已写入 YUI 记忆喵～':'互动已保存，记忆在后台同步喵～';}return d;}
  catch(e){say('已恢复 NEKO。\n记录仍待同步，请重试退出喵～');clearTimeout(timer);}
  finally{exiting=false;el('exitRecord').disabled=false;setTimeout(()=>native('hide'),3200);}
 }
 let nativeTimer=null;
+function requestNativeTakeover(){
+ if(takeoverConfirmed)return true;
+ clearTimeout(nativeTimer);const session=recordingState?.id;
+ nativeTimer=setTimeout(()=>{if(session===recordingState?.id&&recordingActive&&!takeoverConfirmed)window.catfoodNativeState({active:true,ok:false,reason:'timeout',session_id:session});},18000);
+ if(native('recordStart'))return true;
+ clearTimeout(nativeTimer);return false;
+}
 function reportTakeover(d){
  if(!csrf||!recordingState?.id)return;
  fetch('/api/takeover',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({session_id:recordingState.id,ok:!!d.ok,reason:d.reason||null})}).catch(()=>{});
 }
 window.catfoodNativeState=d=>{
+ if(d.session_id&&d.session_id!==recordingState?.id)return;
  clearTimeout(nativeTimer);
  if(!d.active||!recordingActive||exiting)return;
  reportTakeover(d);
- if(d.ok){document.body.classList.remove('record-inactive');el('recordCounts').title=d.paused?'原模型已暂停，原程序窗口已隐藏':'原程序窗口已隐藏';}
- else{document.body.classList.add('record-inactive');native('recordEnd');recordAction('end').catch(()=>{});say(d.reason==='accessibility'?'请先在系统设置授予猫粮辅助功能权限，\n再重新打开挂件喵～':'未能接管原版窗口。\n已保留正常模式喵～');clearTimeout(timer);el('connection').textContent=d.reason==='accessibility'?'辅助功能权限不可用':'请确认原版人物控制可用';}
+ if(d.ok){if(!takeoverConfirmed)restore();takeoverConfirmed=true;document.body.classList.remove('record-inactive');el('recordCounts').title=d.paused?'原模型已暂停，原程序窗口已隐藏':'原程序窗口已隐藏';}
+ else{takeoverConfirmed=false;document.body.classList.add('record-inactive');el('recordCounts').title='人物未替换，原版已保留';native('recordEnd');recordAction('end').catch(()=>{});say(d.reason==='accessibility'?'请先在系统设置授予猫粮辅助功能权限，\n再重新打开挂件喵～':'监控模式未启动，人物未替换。\n已保留原版，请重试喵～');clearTimeout(timer);el('connection').textContent=d.reason==='accessibility'?'辅助功能权限不可用':d.reason==='hide_unconfirmed'?'原版窗口隐藏未确认':'原版人物暂停未确认';}
 };
 async function startRecording(){
+ if(browserPreview)return;
  try{const d=await recordAction('start');if(!d?.active)return;
  document.body.classList.add('record-inactive');restore();
- if(!native('recordStart')){await recordAction('end');say('请从 NEKO 打开桌面挂件喵～');clearTimeout(timer);return;}
- nativeTimer=setTimeout(()=>window.catfoodNativeState({active:true,ok:false}),10000);
+ if(!requestNativeTakeover()){await recordAction('end');say('请从 NEKO 打开桌面挂件喵～');clearTimeout(timer);return;}
  }catch(e){say(e.message);}
 }
 el('exitRecord').onclick=()=>{el('menu').hidden=true;return recordingActive?finishRecording():startRecording();};
-el('historyToggle').onclick=()=>{el('historyPanel').hidden=false;recordAction('status').catch(()=>{});};el('closeHistory').onclick=()=>el('historyPanel').hidden=true;
+el('historyToggle').onclick=()=>{closeContextMenus();el('outfitPanel').hidden=true;el('historyPanel').hidden=false;recordAction('status').catch(()=>{});};el('closeHistory').onclick=()=>el('historyPanel').hidden=true;
 async function retryMemory(){const d=await recordAction('retry');if(d)say(d.pending_memory?'互动已保存，正在重试记忆同步喵～':'已写入 YUI 的记忆喵～');}
 el('retryMemory').onclick=()=>{el('menu').hidden=true;retryMemory().catch(()=>{});};el('historyRetry').onclick=()=>retryMemory().catch(()=>{});
 document.body.classList.add('record-inactive');
-const beginRecording=setInterval(async()=>{if(!csrf)return;clearInterval(beginRecording);try{const d=await recordAction('status');if(d?.active){native('recordStart');nativeTimer=setTimeout(()=>window.catfoodNativeState({active:true,ok:false}),10000);}else if(!d?.initialized)await startRecording();}catch{}},200);
-let recordPollBusy=false;setInterval(async()=>{if(!csrf||exiting||recordPollBusy)return;recordPollBusy=true;try{const wasActive=recordingActive;const d=await recordAction('status');if(d?.active&&!wasActive){document.body.classList.add('record-inactive');if(native('recordStart'))nativeTimer=setTimeout(()=>window.catfoodNativeState({active:true,ok:false}),10000);else await recordAction('end');}}catch{}finally{recordPollBusy=false;}},5000);
+const beginRecording=setInterval(async()=>{if(!csrf)return;clearInterval(beginRecording);try{const d=await recordAction('status');if(browserPreview)return;if(d?.active){requestNativeTakeover();}else if(!d?.initialized)await startRecording();}catch{}},200);
+let recordPollBusy=false;setInterval(async()=>{if(!csrf||exiting||recordPollBusy)return;recordPollBusy=true;try{const wasActive=recordingActive;const d=await recordAction('status');if(!browserPreview&&d?.active&&!wasActive){document.body.classList.add('record-inactive');if(!requestNativeTakeover())await recordAction('end');}}catch{}finally{recordPollBusy=false;}},5000);
 
 window.addEventListener('catfood:musicbeat',()=>{bounce('character');});

@@ -8,10 +8,12 @@ from plugin.sdk.plugin import NekoPluginBase, Ok, lifecycle, llm_tool, neko_plug
 
 from .agent_status import AgentStatus
 from .chat_commands import balance_answer
+from .companion import Companion
 from .fleet import Fleet
 from .recording import Recording
+from .rhythm import Rhythm
 from .server import start_server
-from .takeover import TakeoverState
+from .takeover import TakeoverState, companion_result
 
 
 @neko_plugin
@@ -23,6 +25,8 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
         self.server_thread = None
         self.widget = None
         self.recording = None
+        self.rhythm = None
+        self.companion = None
         self.takeover = TakeoverState()
 
     def show_widget(self):
@@ -52,21 +56,22 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
         self.logger.info("Budget widget: native process launched")
         return {"shown": True, "pid": self.widget.pid}
 
-    def announce(self, text):
+    def announce(self, text, character_name=None):
         result = self.push_message(
             source="neko_token_monitor",
             visibility=["chat"],
             ai_behavior="blind",
             parts=[{"type": "text", "text": text}],
             priority=5,
+            target_lanlan=character_name or "YUI",
         )
         return bool(result.get("submitted"))
 
-    def request_reply(self, line=None):
+    def request_reply(self, line=None, character_name=None):
         try:
             cue = (
                 (
-                    "用户点击了「猫粮」里的 YUI，希望听你说下面这句台词。请仅回复引号中的台词，不执行任何工具，不增加说明，沿用当前角色语音："
+                    "猫粮小游戏或低余额提醒的角色喊话。请沿用你原有的人设和已配置语音，仅说下面这句简短台词，不执行任何工具，不增加说明："
                     + repr(line)
                 )
                 if line
@@ -80,6 +85,7 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
                 ai_behavior="respond",
                 parts=[{"type": "text", "text": cue}],
                 priority=5,
+                target_lanlan=character_name or (self.companion.snapshot()["character_name"] if self.companion else "YUI"),
             )
             if result.get("submitted"):
                 return {"submitted": True, "message": "已交给原软件；回应和出声由 NEKO 当前设置决定。"}
@@ -91,17 +97,20 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
     async def startup(self, **_):
         self.logger.info("Budget widget: startup entered")
         if self.monitor is None:
-            monitor = Fleet(self.data_path("balance-monitor"), announce=self.announce)
+            monitor = Fleet(self.data_path("balance-monitor"))
             self.logger.info("Budget widget: storage ready")
             self.recording = Recording(self.data_path("recording"))
             self.recording.start()
+            self.rhythm = Rhythm(self.data_path("rhythm"))
+            self.companion = Companion(self.data_path("yui-care"), monitor, self.recording, self.request_reply, self.announce)
             server, thread = start_server(
                 monitor, request_reply=self.request_reply, agent_status=AgentStatus(), recording=self.recording,
-                takeover=self.takeover,
+                takeover=self.takeover, rhythm=self.rhythm, companion=self.companion,
             )
             self.logger.info("Budget widget: loopback server ready")
             self.monitor, self.server, self.server_thread = monitor, server, thread
             monitor.start()
+            self.companion.start()
         self.register_static_ui("launcher", cache_control="no-store")
         self.logger.info("Budget widget: UI registered")
         try:
@@ -113,6 +122,12 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
 
     @lifecycle(id="shutdown")
     async def shutdown(self, **_):
+        if self.companion:
+            await asyncio.to_thread(self.companion.close)
+            self.companion = None
+        if self.rhythm:
+            await asyncio.to_thread(self.rhythm.close)
+            self.rhythm = None
         if self.recording:
             result = await asyncio.to_thread(self.recording.action, "end")
             if result.get("summary"):
@@ -161,7 +176,7 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
             return {"shown": False, "takeover": "failed", "message": widget.get("reason", "无法打开猫粮挂件喵～")}
         state = self.recording.action("start")
         if not state.get("active"):
-            return {"shown": True, "takeover": "failed", "message": state.get("error", "互动记录无法启动喵～")}
+            return {"shown": False, "window_opened": True, "monitor_active": False, "takeover": "failed", "message": state.get("error", "互动记录无法启动喵～")}
         self.takeover.begin(state["id"])
         return {"shown": True, "takeover": "pending", "session_id": state["id"]}
 
@@ -169,12 +184,8 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
         result = await asyncio.to_thread(self.start_companion)
         if result["takeover"] != "pending":
             return result
-        outcome = await asyncio.to_thread(self.takeover.wait, result["session_id"], 15)
-        if outcome is None:
-            return {"shown": True, "takeover": "pending", "message": "猫粮挂件已打开，正在确认原版人物是否暂停；暂不能说已经替换喵～"}
-        if outcome["ok"]:
-            return {"shown": True, "takeover": "confirmed", "message": "原版人物已暂停，猫粮 YUI 图片已接管桌面喵～"}
-        return {"shown": True, "takeover": "failed", "message": "未能暂停并隐藏原版人物，猫粮保留正常模式喵～"}
+        outcome = await asyncio.to_thread(self.takeover.wait, result["session_id"], 22)
+        return companion_result(outcome)
 
     @plugin_entry(id="open_panel", name="打开猫粮面板", description="打开猫粮挂件并尝试暂停原版人物、进入 YUI 图片替代模式。")
     async def open_panel(self, **_):
@@ -200,7 +211,7 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
 
     @llm_tool(
         name="catfood_open_monitor",
-        description="当用户用文字说“查看猫粮监测功能”“打开猫粮监测”“显示猫粮挂件/面板”时调用。尝试暂停原版人物并用猫粮 YUI 图片接管桌面。只有 takeover=confirmed 时才能说已经替换；failed 或 pending 必须如实说明。回复句尾带“喵～”。",
+        description="当用户说“监控模式启动”“查看猫粮监测功能”“打开猫粮监测”“显示猫粮挂件/面板”时调用。只有 monitor_active=true 且 takeover=confirmed 才能说监控已启动、人物已替换。failed 或 pending 时按返回 message 说明未启动、未替换，不能因为 window_opened=true 就称已打开监控；只有 reason=accessibility 才可说权限不足，不能猜测原因。回复句尾带“喵～”。",
     )
     async def catfood_open_monitor(self, **_):
         return await self.open_companion()

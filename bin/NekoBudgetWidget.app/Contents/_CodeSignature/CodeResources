@@ -3,9 +3,33 @@
 <plist version="1.0">
 <dict>
 	<key>files</key>
-	<dict/>
+	<dict>
+		<key>Resources/cat-react.gif</key>
+		<data>
+		N+jYXbvTQDa97PM6CsvpRd55KnU=
+		</data>
+		<key>Resources/cat-walk.gif</key>
+		<data>
+		JlD2bmHmqW8UQd4+iaKXJqaspP4=
+		</data>
+	</dict>
 	<key>files2</key>
-	<dict/>
+	<dict>
+		<key>Resources/cat-react.gif</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			rv60TiHKD/nLsGEjZjzCRN4Gyyz6otvaj0e+yFuB4cQ=
+			</data>
+		</dict>
+		<key>Resources/cat-walk.gif</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			aAQv4DUpLo8/mCXdpzMjveUq+7v/gwYMyF7bdkTbisE=
+			</data>
+		</dict>
+	</dict>
 	<key>rules</key>
 	<dict>
 		<key>^Resources/</key>

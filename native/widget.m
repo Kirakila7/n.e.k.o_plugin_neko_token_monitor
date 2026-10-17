@@ -2,6 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #include <signal.h>
+#include <math.h>
 static volatile sig_atomic_t stopping=0;
 static void stopWidget(int signalNumber){stopping=1;}
 
@@ -11,7 +12,37 @@ static void stopWidget(int signalNumber){stopping=1;}
 - (BOOL)canBecomeKeyWindow{return YES;}
 @end
 
-@interface WidgetDelegate : NSObject <NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate>
+@protocol CatGrabDelegate <NSObject>
+- (void)catGrabPhase:(NSString *)phase point:(NSPoint)point;
+@end
+@interface CatGrabView : NSImageView
+@property(weak) id<CatGrabDelegate> grabDelegate;
+@property BOOL facingRight;
+@end
+@implementation CatGrabView
+- (BOOL)isOpaque{return NO;}
+- (BOOL)acceptsFirstMouse:(NSEvent *)event{return YES;}
+- (BOOL)acceptsFirstResponder{return YES;}
+- (BOOL)mouseDownCanMoveWindow{return NO;}
+- (void)drawRect:(NSRect)dirtyRect{
+    [NSGraphicsContext saveGraphicsState];
+    if(self.facingRight){NSAffineTransform *t=[NSAffineTransform transform];[t translateXBy:self.bounds.size.width yBy:0];[t scaleXBy:-1 yBy:1];[t concat];}
+    [super drawRect:dirtyRect];[NSGraphicsContext restoreGraphicsState];
+}
+- (void)resetCursorRects{[self addCursorRect:self.bounds cursor:NSCursor.openHandCursor];}
+- (void)mouseDown:(NSEvent *)event{[self.window makeFirstResponder:self];[NSCursor.closedHandCursor set];[self.grabDelegate catGrabPhase:@"start" point:[self.window convertPointToScreen:event.locationInWindow]];}
+- (void)mouseDragged:(NSEvent *)event{[self.grabDelegate catGrabPhase:@"move" point:[self.window convertPointToScreen:event.locationInWindow]];}
+- (void)mouseUp:(NSEvent *)event{[NSCursor.openHandCursor set];[self.grabDelegate catGrabPhase:@"end" point:[self.window convertPointToScreen:event.locationInWindow]];}
+- (void)keyDown:(NSEvent *)event{if(event.keyCode==53)[self.grabDelegate catGrabPhase:@"cancel" point:NSEvent.mouseLocation];else[super keyDown:event];}
+@end
+static BOOL CatFoodRect(id value,NSRect *rect){
+    if(![value isKindOfClass:NSDictionary.class])return NO;
+    for(NSString *key in @[@"x",@"y",@"width",@"height"])if(![value[key]isKindOfClass:NSNumber.class]||!isfinite([value[key]doubleValue]))return NO;
+    *rect=NSMakeRect([value[@"x"]doubleValue],[value[@"y"]doubleValue],[value[@"width"]doubleValue],[value[@"height"]doubleValue]);
+    return rect->size.width>0&&rect->size.height>0&&rect->size.width<10000&&rect->size.height<10000;
+}
+
+@interface WidgetDelegate : NSObject <NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate, CatGrabDelegate>
 @property NSPanel *panel;
 @property WKWebView *web;
 @property NSPoint dragMouse;
@@ -30,19 +61,44 @@ static void stopWidget(int signalNumber){stopping=1;}
 @property BOOL movedPointer;
 @property CGPoint savedPointer;
 @property CGPoint lastHoverPoint;
+@property NSMutableDictionary<NSNumber *, NSNumber *> *pauseAttemptTimes;
+@property NSMutableDictionary<NSNumber *, NSNumber *> *pauseAttemptCounts;
+@property BOOL retryScheduled;
+@property NSInteger takeoverGeneration;
+@property CFAbsoluteTime takeoverStarted;
+@property BOOL takeoverReported;
+@property NSString *sessionId;
+@property BOOL isolatedPreview;
+@property NSInteger serverPort;
+@property NSPanel *chasePanel;
+@property WKWebView *chaseWeb;
+@property BOOL chaseWanted;
+@property CFAbsoluteTime chaseLease;
+@property NSPanel *catGrabPanel;
+@property BOOL catHeld;
+@property NSDictionary *chaseHome;
+@property NSInteger chaseCatchTotal;
+@property NSImage *catWalkImage;
+@property NSImage *catReactImage;
 @end
 @implementation WidgetDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    self.base=@"http://127.0.0.1:48923";
+    self.isolatedPreview=[NSProcessInfo.processInfo.arguments containsObject:@"--isolated-preview"]||[NSBundle.mainBundle.bundleIdentifier isEqualToString:@"local.neko.catfood.chase-isolated"]||[NSBundle.mainBundle.bundleIdentifier hasPrefix:@"local.neko.catfood.isolated."];
+    self.serverPort=self.isolatedPreview?48924:48923;
+    id previewPort=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CatfoodPreviewPort"];
+    if(self.isolatedPreview&&[previewPort isKindOfClass:NSNumber.class]&&[previewPort integerValue]>1024&&[previewPort integerValue]<65536)self.serverPort=[previewPort integerValue];
+    self.base=[NSString stringWithFormat:@"http://127.0.0.1:%ld",(long)self.serverPort];
     self.parent=getppid();
     self.hiddenApps=[NSMutableDictionary new];
     self.minimizedApps=[NSMutableDictionary new];
     self.pausedApps=[NSMutableDictionary new];
     self.confirmedPausedApps=[NSMutableSet new];
     self.accessibilityHiddenApps=[NSMutableSet new];
+    self.pauseAttemptTimes=[NSMutableDictionary new];
+    self.pauseAttemptCounts=[NSMutableDictionary new];
     signal(SIGTERM,stopWidget);
-    self.panel=[[InputPanel alloc] initWithContentRect:NSMakeRect(0,0,400,404) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
-    self.panel.title=@"猫粮";
+    self.panel=[[InputPanel alloc] initWithContentRect:NSMakeRect(0,0,400,self.isolatedPreview?560:404) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    self.panel.title=self.isolatedPreview?@"猫粮隔离测试":@"猫粮";
     self.panel.opaque=NO;self.panel.backgroundColor=NSColor.clearColor;self.panel.hasShadow=NO;
     self.panel.level=NSFloatingWindowLevel;self.panel.hidesOnDeactivate=NO;
     self.panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
@@ -51,12 +107,102 @@ static void stopWidget(int signalNumber){stopping=1;}
     WKWebViewConfiguration *config=[WKWebViewConfiguration new];
     [config.userContentController addScriptMessageHandler:self name:@"nekoWidget"];
     self.web=[[WKWebView alloc] initWithFrame:NSMakeRect(0,0,400,404) configuration:config];
+    self.web.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
     [self.web setValue:@NO forKey:@"drawsBackground"];
     self.web.navigationDelegate=self;
     self.panel.contentView=self.web;
     [self.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[self.base stringByAppendingString:@"/widget"]]]];
     [self.panel orderFrontRegardless];
-    [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer){if(stopping||getppid()!=self.parent||kill(self.parent,0)!=0)[NSApp terminate:nil];else if(self.recording)[self hideOriginal];}];
+    [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer){
+        if(stopping||(!self.isolatedPreview&&(getppid()!=self.parent||kill(self.parent,0)!=0)))[NSApp terminate:nil];
+        else if(!self.isolatedPreview&&self.recording&&!self.retryScheduled)[self hideOriginal];
+        if(self.chaseWanted&&CFAbsoluteTimeGetCurrent()-self.chaseLease>5)[self stopChase];
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){
+        if(self.chasePanel)[self.chasePanel setFrame:(self.panel.screen?:NSScreen.mainScreen).visibleFrame display:YES];
+    }];
+}
+- (void)reportChase:(BOOL)active {
+    NSMutableDictionary *result=[@{@"active":@(active)} mutableCopy];if(self.sessionId)result[@"session_id"]=self.sessionId;
+    NSData *data=[NSJSONSerialization dataWithJSONObject:result options:0 error:nil];
+    NSString *json=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodNativeChaseState&&window.catfoodNativeChaseState(%@)",json] completionHandler:nil];
+}
+- (void)stopChase {
+    BOOL wasActive=self.chaseWanted||self.chasePanel!=nil;self.chaseWanted=NO;
+    if(self.catHeld)[NSCursor.arrowCursor set];self.catHeld=NO;
+    [self.catGrabPanel orderOut:nil];self.catGrabPanel.contentView=nil;self.catGrabPanel=nil;
+    [self.chasePanel orderOut:nil];[self.chaseWeb stopLoading];self.chasePanel.contentView=nil;self.chaseWeb=nil;self.chasePanel=nil;
+    if(wasActive)[self reportChase:NO];
+}
+- (void)startChase {
+    if(!self.recording||!self.takeoverReported){[self reportChase:NO];return;}
+    self.chaseLease=CFAbsoluteTimeGetCurrent();
+    if(self.chaseWanted)return;self.chaseWanted=YES;
+    NSRect area=(self.panel.screen?:NSScreen.mainScreen).visibleFrame;
+    self.chasePanel=[[InputPanel alloc] initWithContentRect:area styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    self.chasePanel.title=@"猫粮追逐动画层";self.chasePanel.opaque=NO;self.chasePanel.backgroundColor=NSColor.clearColor;self.chasePanel.hasShadow=NO;
+    self.chasePanel.level=NSFloatingWindowLevel-1;self.chasePanel.hidesOnDeactivate=NO;self.chasePanel.ignoresMouseEvents=YES;
+    self.chasePanel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
+    WKWebViewConfiguration *config=[WKWebViewConfiguration new];[config.userContentController addScriptMessageHandler:self name:@"nekoWidget"];
+    self.chaseWeb=[[WKWebView alloc] initWithFrame:NSMakeRect(0,0,area.size.width,area.size.height) configuration:config];
+    self.chaseWeb.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[self.chaseWeb setValue:@NO forKey:@"drawsBackground"];self.chaseWeb.navigationDelegate=self;
+    self.chasePanel.contentView=self.chaseWeb;
+    [self.chaseWeb loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[self.base stringByAppendingString:@"/chase"]]]];
+    [self.chasePanel orderFrontRegardless];
+}
+- (void)updateChaseConfiguration:(id)body {
+    if(![body isKindOfClass:NSDictionary.class])return;
+    NSRect home;if(CatFoodRect(body[@"home"],&home))self.chaseHome=body[@"home"];
+    id total=body[@"catches"];if([total isKindOfClass:NSNumber.class]&&[total doubleValue]>=0&&[total doubleValue]<1e12)self.chaseCatchTotal=[total integerValue];
+}
+- (void)sendChaseConfiguration {
+    if(!self.chaseWeb||!self.chaseHome)return;
+    NSRect local;if(!CatFoodRect(self.chaseHome,&local))return;
+    NSRect owner=self.panel.frame,area=self.chasePanel.frame;
+    NSDictionary *home=@{@"x":@(owner.origin.x+local.origin.x-area.origin.x),@"y":@(NSMaxY(area)-NSMaxY(owner)+local.origin.y),@"width":@(local.size.width),@"height":@(local.size.height)};
+    NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"home":home,@"catches":@(self.chaseCatchTotal)} options:0 error:nil];
+    NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+    [self.chaseWeb evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodChaseSetup&&window.catfoodChaseSetup(%@)",json] completionHandler:nil];
+}
+- (void)updateCatGrabRect:(id)value {
+    if(!self.chaseWanted||self.catHeld||!self.chasePanel)return;
+    NSRect r;if(!CatFoodRect(value,&r))return;NSRect area=self.chasePanel.frame;
+    if(r.origin.x < -r.size.width||r.origin.y < -r.size.height||r.origin.x>area.size.width||r.origin.y>area.size.height)return;
+    if(!self.catGrabPanel){
+        if(!self.catWalkImage)self.catWalkImage=[[NSImage alloc]initWithContentsOfURL:[NSBundle.mainBundle URLForResource:@"cat-walk" withExtension:@"gif"]];
+        if(!self.catReactImage)self.catReactImage=[[NSImage alloc]initWithContentsOfURL:[NSBundle.mainBundle URLForResource:@"cat-react" withExtension:@"gif"]];
+        if(!self.catWalkImage||!self.catReactImage)return;
+        self.catGrabPanel=[[InputPanel alloc]initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+        self.catGrabPanel.title=@"抱小白猫回家";self.catGrabPanel.opaque=NO;self.catGrabPanel.backgroundColor=NSColor.clearColor;self.catGrabPanel.hasShadow=NO;
+        self.catGrabPanel.movableByWindowBackground=NO;self.catGrabPanel.movable=NO;
+        self.catGrabPanel.level=NSFloatingWindowLevel-1;self.catGrabPanel.hidesOnDeactivate=NO;
+        self.catGrabPanel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
+        CatGrabView *view=[[CatGrabView alloc]initWithFrame:NSZeroRect];view.grabDelegate=self;view.animates=YES;view.imageScaling=NSImageScaleProportionallyUpOrDown;
+        [view setAccessibilityElement:YES];[view setAccessibilityRole:NSAccessibilityImageRole];[view setAccessibilityLabel:@"拖动小白猫回到原站位"];[view setAccessibilityHelp:@"按住奔跑中的小猫，拖到心形落点后松开。"];self.catGrabPanel.contentView=view;
+    }
+    CatGrabView *view=(CatGrabView *)self.catGrabPanel.contentView;
+    BOOL yui=[value[@"form"]isEqualToString:@"yui"];
+    BOOL renderInWeb=[value[@"renderInWeb"]boolValue];
+    BOOL handoff=view.image==nil&&!yui&&!renderInWeb;
+    // WebKit draws both sprites at display cadence; this transparent panel only catches drags.
+    NSImage *image=(yui||renderInWeb)?nil:([value[@"reacting"]boolValue]?self.catReactImage:self.catWalkImage);if(view.image!=image)view.image=image;
+    self.catGrabPanel.title=yui?@"抱 YUI 回家":@"抱小白猫回家";
+    [view setAccessibilityLabel:yui?@"拖动 Q版 YUI 回到原站位":@"拖动小白猫回到原站位"];
+    BOOL right=[value[@"facing"]integerValue]>0;if(view.facingRight!=right){view.facingRight=right;view.needsDisplay=YES;}
+    [self.catGrabPanel setFrame:NSMakeRect(area.origin.x+r.origin.x,NSMaxY(area)-r.origin.y-r.size.height,r.size.width,r.size.height) display:YES];
+    if(!self.catGrabPanel.visible)[self.catGrabPanel orderFrontRegardless];
+    if(handoff)[self.chaseWeb evaluateJavaScript:@"window.catfoodChaseNativeCat&&window.catfoodChaseNativeCat()" completionHandler:nil];
+}
+- (void)catGrabPhase:(NSString *)phase point:(NSPoint)point {
+    if(!self.chaseWanted||!self.chaseWeb)return;
+    [self.catGrabPanel.contentView setAccessibilityValue:[phase isEqualToString:@"start"]?@"已抱起":[phase isEqualToString:@"move"]?@"抱回中":@"已松开"];
+    if([phase isEqualToString:@"start"]){self.catHeld=YES;((CatGrabView *)self.catGrabPanel.contentView).image=nil;}
+    NSRect area=self.chasePanel.frame;
+    NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"phase":phase,@"x":@(point.x-area.origin.x),@"y":@(NSMaxY(area)-point.y)} options:0 error:nil];
+    NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+    [self.chaseWeb evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodChaseDrag&&window.catfoodChaseDrag(%@)",json] completionHandler:nil];
+    if(![phase isEqualToString:@"start"]&&![phase isEqualToString:@"move"])self.catHeld=NO;
 }
 - (BOOL)isNeko:(NSRunningApplication *)app {
     if(app.processIdentifier==getpid())return NO;
@@ -213,21 +359,29 @@ static void stopWidget(int signalNumber){stopping=1;}
 - (BOOL)pauseOriginal:(NSRunningApplication *)app {
     NSNumber *pid=@(app.processIdentifier);
     if([self hostControl:@"请她回来" app:app press:NO])return YES;
-    if(self.pausedApps[pid])return NO; // Wait for the host transition; never press twice.
+    // AXPress can be accepted while NEKO ignores the click during another transition.
+    // Retry only the goodbye control, never a toggle or a visible return control.
+    CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
+    if(self.pauseAttemptTimes[pid]&&now-self.pauseAttemptTimes[pid].doubleValue<1.0)return NO;
+    if(self.pauseAttemptCounts[pid].integerValue>=4)return NO;
     if([self hostControl:@"请她离开" app:app press:YES]){
         self.pausedApps[pid]=app;
+        self.pauseAttemptTimes[pid]=@(now);
+        self.pauseAttemptCounts[pid]=@(self.pauseAttemptCounts[pid].integerValue+1);
         return [self hostControl:@"请她回来" app:app press:NO];
     }
     return NO;
 }
 - (void)hideOriginal {
-    NSUInteger found=0;BOOL ok=YES;
+    if(!self.recording)return;
+    if(!self.takeoverStarted)self.takeoverStarted=CFAbsoluteTimeGetCurrent();
+    NSUInteger found=0;BOOL ok=YES;NSString *reason=@"host_not_found";
     for(NSRunningApplication *app in NSWorkspace.sharedWorkspace.runningApplications){
         if(![self isNeko:app]||app.terminated)continue;
         found++;
         NSNumber *pid=@(app.processIdentifier);
         if(self.hiddenApps[pid]&&[self.confirmedPausedApps containsObject:pid]&&[self isHostHidden:app])continue;
-        if(![self pauseOriginal:app]){ok=NO;continue;}
+        if(![self pauseOriginal:app]){ok=NO;reason=@"pause_unconfirmed";continue;}
         [self.confirmedPausedApps addObject:pid];
         if(!app.hidden){
             self.hiddenApps[@(app.processIdentifier)]=app;
@@ -242,22 +396,40 @@ static void stopWidget(int signalNumber){stopping=1;}
                 accepted=[self setAccessibilityHidden:YES app:app];
                 if(accepted)[self.accessibilityHiddenApps addObject:@(app.processIdentifier)];
                 else if([self setHostWindowMinimized:YES app:app])self.minimizedApps[pid]=app;
-                else ok=NO;
+                else if(![self isHostHidden:app]){ok=NO;reason=@"hide_unconfirmed";}
             }
         }
     }
-    if((!ok||found==0)&&self.recording&&self.hideAttempts++<18){
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.35*NSEC_PER_SEC)),dispatch_get_main_queue(),^{if(self.recording)[self hideOriginal];});
+    if((!ok||found==0)&&CFAbsoluteTimeGetCurrent()-self.takeoverStarted<14.0){
+        if(self.retryScheduled)return;
+        self.retryScheduled=YES;NSInteger generation=self.takeoverGeneration;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.35*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            if(!self.recording||generation!=self.takeoverGeneration)return;
+            self.retryScheduled=NO;[self hideOriginal];
+        });
         return;
     }
-    if(ok)self.hideAttempts=0;
+    BOOL confirmed=found>0&&ok;
+    if(confirmed)self.takeoverStarted=0;
     [self restorePointer];
-    NSLog(@"CatFood takeover result targets=%lu ok=%d attempts=%ld",(unsigned long)found,found>0&&ok,(long)self.hideAttempts);
-    NSString *js=[NSString stringWithFormat:@"window.catfoodNativeState && window.catfoodNativeState({active:true,ok:%@,paused:true,targets:%lu})",(found>0&&ok)?@"true":@"false",(unsigned long)found];
-    [self.web evaluateJavaScript:js completionHandler:nil];
+    if(confirmed&&self.takeoverReported)return;
+    NSLog(@"CatFood takeover result targets=%lu ok=%d reason=%@",(unsigned long)found,confirmed,confirmed?@"confirmed":reason);
+    self.takeoverReported=confirmed;
+    [self reportNativeState:confirmed reason:confirmed?nil:reason];
+}
+- (void)reportNativeState:(BOOL)ok reason:(NSString *)reason {
+    NSMutableDictionary *state=[@{@"active":@YES,@"ok":@(ok),@"paused":@(ok)} mutableCopy];
+    if(self.sessionId)state[@"session_id"]=self.sessionId;
+    if(reason)state[@"reason"]=reason;
+    NSData *data=[NSJSONSerialization dataWithJSONObject:state options:0 error:nil];
+    NSString *json=[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodNativeState && window.catfoodNativeState(%@)",json] completionHandler:nil];
 }
 - (void)restoreOriginal {
+    [self stopChase];
     self.recording=NO;
+    self.takeoverGeneration++;self.retryScheduled=NO;self.takeoverStarted=0;self.takeoverReported=NO;
+    if(self.isolatedPreview)return;
     [self restorePointer];
     for(NSRunningApplication *app in self.hiddenApps.allValues)if(!app.terminated){
         if([self.accessibilityHiddenApps containsObject:@(app.processIdentifier)])[self setAccessibilityHidden:NO app:app];
@@ -269,31 +441,85 @@ static void stopWidget(int signalNumber){stopping=1;}
     [self.hiddenApps removeAllObjects];
     for(NSRunningApplication *app in self.pausedApps.allValues){
         if(app.terminated)continue;
-        for(NSInteger attempt=0;attempt<6;attempt++){
-            if([self hostControl:@"请她回来" app:app press:YES])break;
+        BOOL requested=NO,restored=NO;
+        for(NSInteger attempt=0;attempt<24;attempt++){
+            if([self hostControl:@"请她离开" app:app press:NO]){restored=YES;break;}
+            if(!requested)requested=[self hostControl:@"请她回来" app:app press:YES];
             [NSThread sleepForTimeInterval:0.12];
         }
+        NSLog(@"CatFood restore pid=%d model_confirmed=%d",app.processIdentifier,restored);
     }
     [self.pausedApps removeAllObjects];
     [self.confirmedPausedApps removeAllObjects];
+    [self.pauseAttemptTimes removeAllObjects];[self.pauseAttemptCounts removeAllObjects];
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {[self restoreOriginal];}
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
-    if(!message.frameInfo.isMainFrame||![message.frameInfo.securityOrigin.host isEqualToString:@"127.0.0.1"]||message.frameInfo.securityOrigin.port!=48923)return;
-    if(![message.body isKindOfClass:NSString.class])return;
-    NSString *action=message.body;
+    if(!message.frameInfo.isMainFrame||![message.frameInfo.securityOrigin.host isEqualToString:@"127.0.0.1"]||message.frameInfo.securityOrigin.port!=self.serverPort)return;
+    NSString *action=nil,*session=nil;
+    if([message.body isKindOfClass:NSString.class])action=message.body;
+    else if([message.body isKindOfClass:NSDictionary.class]){
+        id value=message.body[@"action"],identifier=message.body[@"session_id"];
+        if([value isKindOfClass:NSString.class])action=value;
+        if([identifier isKindOfClass:NSString.class]&&[identifier length]<=100)session=identifier;
+    }
+    if(!action)return;
+    if(message.webView==self.chaseWeb){
+        if([action isEqualToString:@"chaseReady"]&&self.chaseWanted){[self sendChaseConfiguration];[self reportChase:YES];}
+        else if([action isEqualToString:@"chaseAssetError"])[self stopChase];
+        else if([action isEqualToString:@"chaseGeometry"])[self updateCatGrabRect:message.body[@"rect"]];
+        else if([action isEqualToString:@"chaseEvent"]&&self.chaseWanted){
+            id kind=message.body[@"kind"],identifier=message.body[@"event_id"];
+            if([@[@"start",@"reverse",@"counter_tag",@"flee",@"stop",@"pause",@"resume"]containsObject:kind]&&[identifier isKindOfClass:NSString.class]&&[identifier length]>0&&[identifier length]<=100){
+                NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"kind":kind,@"event_id":identifier} options:0 error:nil];NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+                [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodGameEvent&&window.catfoodGameEvent(%@)",json] completionHandler:nil];
+            }
+        }
+        else if([action isEqualToString:@"chaseCaught"]&&self.chaseWanted){
+            id identifier=message.body[@"event_id"];
+            if([identifier isKindOfClass:NSString.class]&&[identifier length]>0&&[identifier length]<=100){
+                NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"event_id":identifier} options:0 error:nil];NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+                [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodGameCatch&&window.catfoodGameCatch(%@)",json] completionHandler:nil];
+            }
+        }else if([action isEqualToString:@"catReturned"]&&self.chaseWanted)[self.web evaluateJavaScript:@"window.catfoodGameReturned&&window.catfoodGameReturned()" completionHandler:nil];
+        return;
+    }
+    if(message.webView!=self.web)return;
+    if([action hasPrefix:@"chase"]){
+        if(session&&self.sessionId&&![session isEqualToString:self.sessionId])return;
+        [self updateChaseConfiguration:message.body];
+        if([action isEqualToString:@"chaseStart"])[self startChase];
+        else if([action isEqualToString:@"chaseStop"])[self stopChase];
+        else if([action isEqualToString:@"chaseHeartbeat"]&&self.chaseWanted){self.chaseLease=CFAbsoluteTimeGetCurrent();[self sendChaseConfiguration];}
+        else if([action isEqualToString:@"chaseConfigure"])[self sendChaseConfiguration];
+        else if([action isEqualToString:@"chaseInspect"]&&self.isolatedPreview&&self.chaseWeb){
+            [self.chaseWeb evaluateJavaScript:@"window.catfoodChaseInspect&&window.catfoodChaseInspect()" completionHandler:^(id result,NSError *error){
+                NSRect h;if(!self.catGrabPanel||!CatFoodRect(self.chaseHome,&h))return;
+                NSRect owner=self.panel.frame,grab=self.catGrabPanel.frame;
+                double x=owner.origin.x+h.origin.x+h.size.width/2-grab.origin.x;
+                double y=NSMaxY(grab)-(NSMaxY(owner)-h.origin.y-h.size.height/2);
+                [self.catGrabPanel.contentView setAccessibilityHelp:[NSString stringWithFormat:@"隔离拖拽验证：原站位相对本窗口 x=%.1f y=%.1f；输入层 %.1f x %.1f",x,y,grab.size.width,grab.size.height]];
+                [self.catGrabPanel makeKeyAndOrderFront:nil];[self.catGrabPanel makeFirstResponder:self.catGrabPanel.contentView];
+            }];
+        }
+        return;
+    }
     if([action isEqualToString:@"settings"])[NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:self.base]];
     else if([action isEqualToString:@"recordStart"]){
         // Status polling and initial page load can both request the same session.
         // Retrying a completed takeover would activate and unhide NEKO again.
-        if(self.recording)return;
+        if(self.recording&&(!session||[session isEqualToString:self.sessionId]))return;
+        if(self.recording)[self restoreOriginal];
+        self.sessionId=session;self.takeoverGeneration++;
+        self.takeoverStarted=0;self.takeoverReported=NO;
+        if(self.isolatedPreview){self.recording=YES;self.takeoverReported=YES;[self reportNativeState:YES reason:nil];return;}
         if(!AXIsProcessTrusted()){
             if(!self.accessibilityPrompted){
                 self.accessibilityPrompted=YES;
                 AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{(__bridge NSString *)kAXTrustedCheckOptionPrompt:@YES});
             }
             NSLog(@"CatFood cannot take over: Accessibility permission is unavailable");
-            [self.web evaluateJavaScript:@"window.catfoodNativeState && window.catfoodNativeState({active:true,ok:false,reason:'accessibility'})" completionHandler:nil];
+            [self reportNativeState:NO reason:@"accessibility"];
         }else{self.recording=YES;self.hideAttempts=0;[self hideOriginal];}
     }
     else if([action isEqualToString:@"recordEnd"])[self restoreOriginal];
@@ -304,7 +530,12 @@ static void stopWidget(int signalNumber){stopping=1;}
 }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))handler {
     NSURL *url=action.request.URL;
-    handler(([url.host isEqualToString:@"127.0.0.1"]&&url.port.integerValue==48923&&[url.scheme isEqualToString:@"http"])?WKNavigationActionPolicyAllow:WKNavigationActionPolicyCancel);
+    handler(([url.host isEqualToString:@"127.0.0.1"]&&url.port.integerValue==self.serverPort&&[url.scheme isEqualToString:@"http"])?WKNavigationActionPolicyAllow:WKNavigationActionPolicyCancel);
 }
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if(webView==self.web)[webView evaluateJavaScript:@"window.catfoodChaseCapabilities={desktop:true};window.dispatchEvent(new Event('catfood:chasecapabilities'))" completionHandler:nil];
+}
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {if(webView==self.web||webView==self.chaseWeb)[self stopChase];}
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {if(webView==self.chaseWeb)[self stopChase];}
 @end
 int main(int argc,const char *argv[]){@autoreleasepool{NSApplication *app=NSApplication.sharedApplication;[app setActivationPolicy:NSApplicationActivationPolicyAccessory];WidgetDelegate *delegate=[WidgetDelegate new];app.delegate=delegate;[app run];}return 0;}

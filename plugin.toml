@@ -1,9 +1,9 @@
 [plugin]
 id = "neko_token_monitor"
 name = "猫粮"
-description = "透明桌面猫娘和余额思考气泡：点击吐槽、摸头、拖动、低余额提醒；支持 Codex 套餐额度、JEV 本机用量、DeepSeek 余额、GPT/Claude 费用预算、自定义接口和手动预算；退出记录模式后关闭挂件，可从插件入口再次打开。"
+description = "YUI 桌面猫粮挂件：支持 DeepSeek Harness 账户余额与应用内充值、TRAE/WorkBuddy 本机积分面板（macOS）、DeepSeek/Kimi API 余额、Qwen 阿里云账户额度、Codex 套餐、GPT/Claude 预算及手动积分记录；配合脸色、跳动、追逐、互动记忆和低粮提醒。各来源标明自动/手动与数据是否过期。"
 short_description = "YUI companion with configurable balance sources and explicitly estimated budgets."
-version = "0.8.8"
+version = "0.8.25"
 entry = "plugin.plugins.neko_token_monitor:NekoTokenMonitorPlugin"
 
 [plugin.author]

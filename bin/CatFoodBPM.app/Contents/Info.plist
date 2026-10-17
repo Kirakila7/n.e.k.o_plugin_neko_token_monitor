@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>猫粮节拍</string>
+	<key>CFBundleExecutable</key>
+	<string>CatFoodBPM</string>
+	<key>CFBundleIdentifier</key>
+	<string>cn.projectneko.plugin.catfood-bpm</string>
+	<key>CFBundleName</key>
+	<string>CatFoodBPM</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.8.9</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>本机分析播放器的音乐节拍，不保存或上传声音。</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>仅接收系统音频计算 BPM，不接收、保存或上传屏幕画面。</string>
+</dict>
+</plist>
