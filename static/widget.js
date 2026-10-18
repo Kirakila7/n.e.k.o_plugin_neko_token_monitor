@@ -25,7 +25,7 @@ function setRecordBarVisible(visible,persist=true){
 }
 el('recordVisibilityToggle').onclick=()=>setRecordBarVisible(!recordBarVisible);
 setRecordBarVisible(recordBarVisible,false);
-function native(action){const bridge=window.webkit?.messageHandlers?.nekoWidget;if(bridge){bridge.postMessage(action==='recordStart'?{action,session_id:recordingState?.id}:action);return true;}if(window.chrome?.webview){window.chrome.webview.postMessage(action);return true;}return false;}
+function native(action){const bridge=window.webkit?.messageHandlers?.nekoWidget;if(bridge){bridge.postMessage(['recordStart','recordEnd'].includes(action)?{action,session_id:recordingState?.id}:action);return true;}if(window.chrome?.webview){window.chrome.webview.postMessage(action);return true;}return false;}
 let agentState='unknown',agentData=null,idleCard=false;
 const wardrobe=window.CatfoodWardrobe;
 let outfitMode='auto',fixedOutfit='original',requestedOutfit=null,outfitRevision=0;
@@ -230,7 +230,7 @@ pollAgent();
 
 async function requestSpokenLine(line){if(!csrf)return;try{const r=await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({line})});const result=await r.json();el('connection').textContent=r.ok&&result.submitted?'已请求原软件回应\n出声取决于语音状态':r.status===429?'语音稍等一下喵～':result.error||'原软件语音暂不可用';}catch{el('connection').textContent='原软件语音未连接';}}
 
-let recordingActive=false, recordingState=null, recordQueue=Promise.resolve(), exiting=false,takeoverConfirmed=false;
+let recordingActive=false, recordingState=null, recordQueue=Promise.resolve(), exiting=false,takeoverConfirmed=false,nativeHideTimer=null;
 const lastStatusNotes=new Map();
 function noteStatus(kind,message){
  if(!recordingActive||exiting||!message||lastStatusNotes.get(kind)===message)return;
@@ -245,7 +245,7 @@ function renderRecording(d){
  const newlyActive=!recordingActive&&!!d.active;
  recordingState=d;recordingActive=!!d.active;
  window.dispatchEvent(new CustomEvent('catfood:recordsnapshot',{detail:d}));
- if(newlyActive){takeoverConfirmed=false;lastStatusNotes.clear();document.body.classList.remove('record-finished');el('recordCounts').title='正在确认人物替换';restore();noteStatus('agent',el('agentStatus').textContent);noteStatus('connection',el('connection').textContent);}
+ if(newlyActive){clearTimeout(nativeHideTimer);nativeHideTimer=null;takeoverConfirmed=false;lastStatusNotes.clear();document.body.classList.remove('record-finished');el('recordCounts').title='正在确认人物替换';restore();noteStatus('agent',el('agentStatus').textContent);noteStatus('connection',el('connection').textContent);}
  el('exitRecord').textContent=browserPreview?'请在桌面挂件中操作':recordingActive?'和猫娘一起玩':'开始记录模式';
  el('exitRecord').disabled=browserPreview;
  el('recordCounts').textContent=d.error||`本次摸头 ${d.pet||0} · 询问 ${d.ask||0} ｜累计摸头 ${d.totals?.pet||0} · 询问 ${d.totals?.ask||0}`;
@@ -255,19 +255,35 @@ function renderRecording(d){
 }
 function pendingClicks(){try{return JSON.parse(localStorage.getItem('catfood-pending-clicks')||'[]');}catch{return [];}}
 function savePending(items){localStorage.setItem('catfood-pending-clicks',JSON.stringify(items));}
+function pendingEnds(){try{const rows=JSON.parse(localStorage.getItem('catfood-pending-ends')||'[]');return Array.isArray(rows)?rows.filter(x=>x&&typeof x.session_id==='string'&&x.session_id.length>0&&x.session_id.length<=100):[];}catch{return [];}}
+function savePendingEnds(items){localStorage.setItem('catfood-pending-ends',JSON.stringify(items));}
 async function sendRecord(body){
  if(!csrf)throw Error('插件尚未连接喵～');
  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),8000);
  try{const r=await fetch('/api/recording',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify(body),signal:controller.signal});if(!r.ok)throw Error('记录未保存喵～');const d=await r.json();if(d.error)throw Error(d.error);renderRecording(d);return d;}finally{clearTimeout(timeout);}
 }
 async function flushClicks(){for(const item of pendingClicks()){await sendRecord(item);savePending(pendingClicks().filter(x=>x.event_id!==item.event_id));}}
+async function flushEnds(){for(const item of pendingEnds()){const d=await sendRecord(item);if(d.ended_session_id!==item.session_id)throw Error('结束记录仍待同步喵～');savePendingEnds(pendingEnds().filter(x=>x.session_id!==item.session_id));}}
 function recordAction(action,details={}){
  if(browserPreview&&action!=='status')return Promise.resolve(null);
  if(['pet','ask','note','game'].includes(action)){
   if(!recordingActive||exiting)return Promise.resolve(null);
   const item={action,event_id:crypto.randomUUID(),session_id:recordingState.id,...details};savePending([...pendingClicks(),item]);
  }
- const work=async()=>{if(!browserPreview)await flushClicks();return ['pet','ask','note','game'].includes(action)?recordingState:sendRecord({action});};
+ if(action==='end'){
+  const id=details.session_id||recordingState?.id;
+  if(id&&!pendingEnds().some(x=>x.session_id===id))savePendingEnds([...pendingEnds(),{action:'end',session_id:id}]);
+ }
+ const work=async()=>{
+  if(!browserPreview){
+   // Close sessions before replaying clicks; old clicks retain their original session ID.
+   // A failed close remains durable and blocks start/status from resuming that session.
+   await flushEnds();
+   if(action==='end'){try{await flushClicks();}catch{}return recordingState;}
+   await flushClicks();
+  }
+  return ['pet','ask','note','game'].includes(action)?recordingState:sendRecord({action});
+ };
  const result=recordQueue.then(work);recordQueue=result.catch(()=>{el('recordCounts').textContent='记录暂未同步，点击已暂存在本机，将自动重试喵～';});return result;
 }
 async function finishRecording(){
@@ -275,9 +291,9 @@ async function finishRecording(){
  if(exiting)return;exiting=true;el('exitRecord').disabled=true;
  // Restore the original immediately even when the loopback server is unavailable.
  window.dispatchEvent(new Event('catfood:recordend'));native('recordEnd');document.body.classList.add('record-inactive','record-finished');el('historyPanel').hidden=true;el('outfitPanel').hidden=true;closeContextMenus();
- try{const d=await recordAction('end');if(d?.summary){say(d.summary);clearTimeout(timer);el('connection').textContent=d.memory_saved?'已写入 YUI 记忆喵～':'互动已保存，记忆在后台同步喵～';}return d;}
- catch(e){say('已恢复 NEKO。\n记录仍待同步，请重试退出喵～');clearTimeout(timer);}
- finally{exiting=false;el('exitRecord').disabled=false;setTimeout(()=>native('hide'),3200);}
+ try{const d=await recordAction('end');if(d?.summary){say(pendingClicks().length?'已结束记录，互动次数会在同步后更新喵～':d.summary);clearTimeout(timer);el('connection').textContent=d.memory_saved?'已写入 YUI 记忆喵～':'互动已保存，记忆在后台同步喵～';}return d;}
+ catch(e){say('已恢复 NEKO。\n结束记录已暂存，恢复连接后自动同步喵～');clearTimeout(timer);}
+ finally{exiting=false;el('exitRecord').disabled=false;nativeHideTimer=setTimeout(()=>native('hide'),3200);}
 }
 let nativeTimer=null;
 function requestNativeTakeover(){
@@ -312,6 +328,6 @@ async function retryMemory(){const d=await recordAction('retry');if(d)say(d.pend
 el('retryMemory').onclick=()=>{el('menu').hidden=true;retryMemory().catch(()=>{});};el('historyRetry').onclick=()=>retryMemory().catch(()=>{});
 document.body.classList.add('record-inactive');
 const beginRecording=setInterval(async()=>{if(!csrf)return;clearInterval(beginRecording);try{const d=await recordAction('status');if(browserPreview)return;if(d?.active){requestNativeTakeover();}else if(!d?.initialized)await startRecording();}catch{}},200);
-let recordPollBusy=false;setInterval(async()=>{if(!csrf||exiting||recordPollBusy)return;recordPollBusy=true;try{const wasActive=recordingActive;const d=await recordAction('status');if(!browserPreview&&d?.active&&!wasActive){document.body.classList.add('record-inactive');if(!requestNativeTakeover())await recordAction('end');}}catch{}finally{recordPollBusy=false;}},5000);
+let recordPollBusy=false;setInterval(async()=>{if(!csrf||exiting||recordPollBusy)return;recordPollBusy=true;try{const wasActive=recordingActive;const d=await recordAction('status');if(!browserPreview&&d?.active&&!wasActive){document.body.classList.add('record-inactive');if(!requestNativeTakeover())await recordAction('end');}}catch{}finally{recordPollBusy=false;}},1000);
 
 window.addEventListener('catfood:musicbeat',()=>{bounce('character');});

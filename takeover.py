@@ -15,6 +15,7 @@ def companion_result(outcome):
         "pause_unconfirmed": "未确认原版人物已经暂停",
         "hide_unconfirmed": "未确认原版窗口已经隐藏",
         "timeout": "等待人物替换确认超时",
+        "session_ended": "本次记录已经结束，原版人物已恢复",
         "pending": "仍在等待原版人物暂停与窗口隐藏的确认",
     }.get(reason, "没有收到原版人物已暂停并隐藏的确认")
     return {"shown": False, "window_opened": True, "monitor_active": False,

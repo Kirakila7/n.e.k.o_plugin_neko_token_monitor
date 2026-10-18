@@ -45,6 +45,7 @@ class Recording:
         self.wake = threading.Event()
         self.stop = threading.Event()
         self.worker = None
+        self.end_watcher = None
         self.load_error = None
         self.character_name = "YUI"
         raw = None
@@ -81,6 +82,7 @@ class Recording:
             temporary.replace(path)
 
     def snapshot(self):
+        self.reconcile_ends()
         with self.lock:
             sessions = self.data["sessions"]
             current = sessions[-1] if sessions else {"active": False}
@@ -104,10 +106,13 @@ class Recording:
             )
 
     def action(self, action, event_id=None, session_id=None, kind=None, message=None, quota=None):
+        self.reconcile_ends()
         if action not in ("start", "pet", "ask", "note", "game", "end", "status", "retry"):
             raise ValueError("Unknown recording action")
         if event_id is not None and (not isinstance(event_id, str) or not 1 <= len(event_id) <= 100):
             raise ValueError("Invalid event id")
+        if session_id is not None and (not isinstance(session_id, str) or not 1 <= len(session_id) <= 100):
+            raise ValueError("Invalid session id")
         if action == "note" and (
             kind not in ("agent", "connection") or not isinstance(message, str) or not 1 <= len(message) <= 240
         ):
@@ -161,10 +166,10 @@ class Recording:
                         del notes[:-200]
                     if event_id:
                         seen.append(event_id)
-            elif action == "end" and current and current.get("active"):
-                current.update(active=False, end=now(), memory_saved=False)
-                current["summary"] = self.summary(current)
-                current["memory_revision"] = current.get("memory_revision", 0) + 1
+            elif action == "end":
+                target = next((row for row in sessions if row["id"] == session_id), None) if session_id else current
+                if target and target.get("active"):
+                    self.end_session(target)
             if action != "status":
                 self.save()
             if action in ("end", "retry") or action == "game" and kind in ("reverse", "rescue", "stop"):
@@ -172,7 +177,42 @@ class Recording:
             result = self.snapshot()
             if action == "game":
                 result["event_accepted"] = accepted
+            if action == "end":
+                # An end replay from an old/replaced store is already resolved;
+                # acknowledge it without touching the current session.
+                result["ended_session_id"] = target["id"] if target else session_id
             return result
+
+    def end_session(self, row):
+        row.update(active=False, end=now(), memory_saved=False)
+        row["summary"] = self.summary(row)
+        row["memory_revision"] = row.get("memory_revision", 0) + 1
+
+    def reconcile_ends(self):
+        """Native exit markers survive a dead WebKit page or unavailable HTTP transport."""
+        with self.lock:
+            if self.load_error:
+                return
+            for path in self.path.parent.glob("closed-*.json"):
+                try:
+                    if path.is_symlink() or path.stat().st_size > 512:
+                        continue
+                    identifier = path.name.removeprefix("closed-").removesuffix(".json")
+                    if str(uuid.UUID(identifier)) != identifier:
+                        continue
+                    marker = json.loads(path.read_text())
+                    if not isinstance(marker, dict) or marker.get("session_id") != identifier:
+                        continue
+                    target = next((row for row in self.data["sessions"] if row["id"] == identifier), None)
+                    if target:
+                        if target.get("active"):
+                            self.end_session(target)
+                        self.save()
+                        self.wake.set()
+                    path.unlink(missing_ok=True)
+                except (OSError, ValueError, TypeError):
+                    # Retain uncommitted markers so a transient disk error cannot reopen a session.
+                    continue
 
     def remember(self, kind, text, quota=None, event_id=None):
         """Durable background observations, including when no widget session is active."""
@@ -230,12 +270,19 @@ class Recording:
 
         self.worker = threading.Thread(target=run, daemon=True)
         self.worker.start()
+        def watch_ends():
+            while not self.stop.wait(0.5):
+                self.reconcile_ends()
+        self.end_watcher = threading.Thread(target=watch_ends, daemon=True, name="catfood-session-ends")
+        self.end_watcher.start()
 
     def close(self):
         self.stop.set()
         self.wake.set()
         if self.worker:
             self.worker.join(1)
+        if self.end_watcher:
+            self.end_watcher.join(1)
 
     @staticmethod
     def memory_text(row):

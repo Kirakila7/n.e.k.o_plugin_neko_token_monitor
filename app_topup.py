@@ -39,6 +39,7 @@ def _run(profile):
     if not helper.is_file():
         return {'ok': False, 'error': 'component'}
     try:
+        helper.chmod(helper.stat().st_mode | 0o100)
         completed = subprocess.run([str(helper), profile], stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=16)
         if completed.returncode or len(completed.stdout) > 4096:

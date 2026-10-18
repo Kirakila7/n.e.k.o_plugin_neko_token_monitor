@@ -38,6 +38,8 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
             Path(__file__).parent / "bin" / "NekoBudgetWidget.app" / "Contents" / "MacOS" / "neko-budget-widget"
         )
         arguments = [str(executable)]
+        if sys.platform == "darwin":
+            arguments += ["--recording-dir", str(self.recording.path.parent)]
         if sys.platform == "win32":
             executable = Path(__file__).parent / "bin" / "windows" / "CatFood.exe"
             self.stop_file = Path(self.data_path("widget.stop"))
@@ -115,6 +117,8 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
         self.logger.info("Budget widget: UI registered")
         try:
             snapshot = self.recording.snapshot()
+            if snapshot.get("active"):
+                self.takeover.begin(snapshot["id"])
             widget = self.show_widget() if snapshot.get("active") or not snapshot.get("initialized") else {"shown": False, "reason": "已退出记录模式；可从插件入口再次打开"}
         except OSError:
             widget = {"shown": False, "reason": "桌面挂件未能启动，请查看插件面板"}
@@ -185,6 +189,9 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
         if result["takeover"] != "pending":
             return result
         outcome = await asyncio.to_thread(self.takeover.wait, result["session_id"], 22)
+        state = self.recording.snapshot()
+        if (not state.get("active") or state.get("id") != result["session_id"]) and (outcome is None or outcome.get("ok")):
+            outcome = {"ok": False, "reason": "session_ended"}
         return companion_result(outcome)
 
     @plugin_entry(id="open_panel", name="打开猫粮面板", description="打开猫粮挂件并尝试暂停原版人物、进入 YUI 图片替代模式。")

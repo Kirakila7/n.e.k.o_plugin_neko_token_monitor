@@ -68,6 +68,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
 @property CFAbsoluteTime takeoverStarted;
 @property BOOL takeoverReported;
 @property NSString *sessionId;
+@property NSString *recordingDirectory;
 @property BOOL isolatedPreview;
 @property NSInteger serverPort;
 @property NSPanel *chasePanel;
@@ -89,6 +90,9 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     if(self.isolatedPreview&&[previewPort isKindOfClass:NSNumber.class]&&[previewPort integerValue]>1024&&[previewPort integerValue]<65536)self.serverPort=[previewPort integerValue];
     self.base=[NSString stringWithFormat:@"http://127.0.0.1:%ld",(long)self.serverPort];
     self.parent=getppid();
+    NSArray *arguments=NSProcessInfo.processInfo.arguments;
+    NSUInteger directoryFlag=[arguments indexOfObject:@"--recording-dir"];
+    if(directoryFlag!=NSNotFound&&directoryFlag+1<arguments.count&&[arguments[directoryFlag+1] isAbsolutePath])self.recordingDirectory=arguments[directoryFlag+1];
     self.hiddenApps=[NSMutableDictionary new];
     self.minimizedApps=[NSMutableDictionary new];
     self.pausedApps=[NSMutableDictionary new];
@@ -426,6 +430,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodNativeState && window.catfoodNativeState(%@)",json] completionHandler:nil];
 }
 - (void)restoreOriginal {
+    [self persistRecordingEnd];
     [self stopChase];
     self.recording=NO;
     self.takeoverGeneration++;self.retryScheduled=NO;self.takeoverStarted=0;self.takeoverReported=NO;
@@ -452,6 +457,22 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     [self.pausedApps removeAllObjects];
     [self.confirmedPausedApps removeAllObjects];
     [self.pauseAttemptTimes removeAllObjects];[self.pauseAttemptCounts removeAllObjects];
+}
+- (void)persistRecordingEnd {
+    if(!self.recordingDirectory||!self.sessionId||![[NSUUID alloc]initWithUUIDString:self.sessionId])return;
+    NSString *name=[NSString stringWithFormat:@"closed-%@.json",self.sessionId.lowercaseString];
+    NSString *path=[self.recordingDirectory stringByAppendingPathComponent:name];
+    NSData *data=[NSJSONSerialization dataWithJSONObject:@{@"session_id":self.sessionId.lowercaseString} options:0 error:nil];
+    NSError *error=nil;
+    if(![data writeToFile:path options:NSDataWritingAtomic error:&error])NSLog(@"CatFood could not persist session end: %@",error.localizedDescription);
+    else [NSFileManager.defaultManager setAttributes:@{NSFilePosixPermissions:@0600} ofItemAtPath:path error:nil];
+}
+- (void)mainWebFailed {
+    // The UI cannot send recordEnd after a renderer crash. Restore before quitting;
+    // the durable marker lets Python close the session without any HTTP request.
+    [self restoreOriginal];
+    [self.panel orderOut:nil];
+    [NSApp terminate:nil];
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {[self restoreOriginal];}
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -522,7 +543,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
             [self reportNativeState:NO reason:@"accessibility"];
         }else{self.recording=YES;self.hideAttempts=0;[self hideOriginal];}
     }
-    else if([action isEqualToString:@"recordEnd"])[self restoreOriginal];
+    else if([action isEqualToString:@"recordEnd"]){if(!session||!self.sessionId||[session isEqualToString:self.sessionId])[self restoreOriginal];}
     else if([action isEqualToString:@"hide"])[NSApp terminate:nil];
     else if([action isEqualToString:@"dragStart"]){self.dragging=YES;self.dragMouse=NSEvent.mouseLocation;self.dragOrigin=self.panel.frame.origin;}
     else if([action isEqualToString:@"dragEnd"])self.dragging=NO;
@@ -535,7 +556,8 @@ static BOOL CatFoodRect(id value,NSRect *rect){
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     if(webView==self.web)[webView evaluateJavaScript:@"window.catfoodChaseCapabilities={desktop:true};window.dispatchEvent(new Event('catfood:chasecapabilities'))" completionHandler:nil];
 }
-- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {if(webView==self.web||webView==self.chaseWeb)[self stopChase];}
-- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {if(webView==self.chaseWeb)[self stopChase];}
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {if(webView==self.web)[self mainWebFailed];else if(webView==self.chaseWeb)[self stopChase];}
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {if(error.code==NSURLErrorCancelled)return;if(webView==self.web)[self mainWebFailed];else if(webView==self.chaseWeb)[self stopChase];}
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {[self webView:webView didFailNavigation:navigation withError:error];}
 @end
 int main(int argc,const char *argv[]){@autoreleasepool{NSApplication *app=NSApplication.sharedApplication;[app setActivationPolicy:NSApplicationActivationPolicyAccessory];WidgetDelegate *delegate=[WidgetDelegate new];app.delegate=delegate;[app run];}return 0;}

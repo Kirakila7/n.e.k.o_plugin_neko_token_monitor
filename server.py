@@ -141,15 +141,15 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                 if self.path == "/api/recording":
                     if body.get("action") == "game" and companion:
                         return self.send(200, companion.handle_game(body.get("kind"), body.get("event_id"), body.get("session_id")))
-                    return self.send(
-                        200,
+                    result = (
                         recording.action(
                             body.get("action", "status"), body.get("event_id"), body.get("session_id"),
                             body.get("kind"), body.get("message"),
-                        )
-                        if recording
-                        else {"active": False},
+                        ) if recording else {"active": False}
                     )
+                    if takeover and result.get("active"):
+                        takeover.begin(result["id"])
+                    return self.send(200, result)
                 if self.path == "/api/care":
                     if companion is None:
                         return self.send(503, {"error": "YUI 提醒服务尚未启动"})
@@ -157,6 +157,10 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                 if self.path == "/api/takeover":
                     if takeover is None or not isinstance(body.get("session_id"), str) or type(body.get("ok")) is not bool:
                         return self.send(400, {"error": "接管状态无效"})
+                    state = recording.snapshot() if recording else {}
+                    if not state.get("active") or state.get("id") != body["session_id"]:
+                        return self.send(200, {"accepted": False})
+                    takeover.begin(state["id"])
                     return self.send(200, {"accepted": takeover.report(body["session_id"], body["ok"], body.get("reason"))})
                 if self.path == "/api/usage":
                     return self.send(200, monitor.record_usage(body))

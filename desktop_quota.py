@@ -53,6 +53,8 @@ def read_quota(app):
     if not helper.is_file():
         raise ValueError("缺少本机额度读取组件，请更新猫粮或切换手动记录")
     try:
+        # Plugin Center creates extracted files with 0644 permissions.
+        helper.chmod(helper.stat().st_mode | 0o100)
         result = subprocess.run([str(helper), app], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
         if len(result.stdout) > 65536:
