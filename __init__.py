@@ -48,6 +48,8 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
         arguments = [str(executable)]
         if sys.platform == "darwin":
             arguments += ["--recording-dir", str(self.recording.path.parent)]
+            if not self.recording.snapshot().get("active"):
+                arguments.append("--launcher-only")
         if sys.platform == "win32":
             executable = Path(__file__).parent / "bin" / "windows" / "CatFood.exe"
             self.stop_file = Path(self.data_path("widget.stop"))
@@ -127,7 +129,8 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
             snapshot = self.recording.snapshot()
             if snapshot.get("active"):
                 self.takeover.begin(snapshot["id"])
-            widget = self.show_widget() if snapshot.get("active") or not snapshot.get("initialized") else {"shown": False, "reason": "已退出记录模式；可从插件入口再次打开"}
+            show = sys.platform == "darwin" or snapshot.get("active") or not snapshot.get("initialized")
+            widget = self.show_widget() if show else {"shown": False, "reason": "已退出记录模式；可从插件入口再次打开"}
         except OSError:
             widget = {"shown": False, "reason": "桌面挂件未能启动，请查看插件面板"}
         return Ok({"panel": "http://127.0.0.1:48923", "widget": widget})

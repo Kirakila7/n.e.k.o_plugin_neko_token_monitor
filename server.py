@@ -164,7 +164,11 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                     if takeover is None or not isinstance(body.get("session_id"), str) or type(body.get("ok")) is not bool:
                         return self.send(400, {"error": "接管状态无效"})
                     state = recording.snapshot() if recording else {}
-                    if not state.get("active") or state.get("id") != body["session_id"]:
+                    # Native restoration writes an end marker before this HTTP
+                    # request may arrive. Keep the last session's failure reason
+                    # so its waiter can finish; never accept success after exit
+                    # or let an older session complete a newer attempt.
+                    if state.get("id") != body["session_id"] or (body["ok"] and not state.get("active")):
                         return self.send(200, {"accepted": False})
                     takeover.begin(state["id"])
                     return self.send(200, {"accepted": takeover.report(body["session_id"], body["ok"], body.get("reason"))})

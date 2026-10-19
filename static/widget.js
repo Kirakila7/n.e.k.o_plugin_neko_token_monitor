@@ -316,17 +316,19 @@ function requestNativeTakeover(){
  if(native('recordStart'))return true;
  clearTimeout(nativeTimer);return false;
 }
-function reportTakeover(d){
- if(!csrf||!recordingState?.id)return;
- fetch('/api/takeover',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({session_id:recordingState.id,ok:!!d.ok,reason:d.reason||null})}).catch(()=>{});
+async function reportTakeover(d){
+ const session=d.session_id||recordingState?.id;if(!csrf||!session)return false;
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),3000);
+ try{const response=await fetch('/api/takeover',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({session_id:session,ok:!!d.ok,reason:d.reason||null}),signal:controller.signal});return response.ok&&(await response.json()).accepted===true;}
+ catch{return false;}finally{clearTimeout(timeout);}
 }
 window.catfoodNativeState=d=>{
  if(d.session_id&&d.session_id!==recordingState?.id)return;
  clearTimeout(nativeTimer);
  if(!d.active||!recordingActive||exiting)return;
- reportTakeover(d);
+ const session=recordingState.id,report=reportTakeover(d);
  if(d.ok){if(!takeoverConfirmed)restore();takeoverConfirmed=true;document.body.classList.remove('record-inactive');el('recordCounts').title=d.paused?'原模型已暂停，原程序窗口已隐藏':'原程序窗口已隐藏';}
- else{takeoverConfirmed=false;document.body.classList.add('record-inactive');el('recordCounts').title='人物未替换，原版已保留';native('recordEnd');recordAction('end').catch(()=>{});say(d.reason==='accessibility'?'请先在系统设置授予猫粮辅助功能权限，\n再重新打开挂件喵～':'监控模式未启动，人物未替换。\n已保留原版，请重试喵～');clearTimeout(timer);el('connection').textContent=d.reason==='accessibility'?'辅助功能权限不可用':d.reason==='hide_unconfirmed'?'原版窗口隐藏未确认':'原版人物暂停未确认';}
+ else{takeoverConfirmed=false;document.body.classList.add('record-inactive');el('recordCounts').title='人物未替换，原版已保留';native('recordEnd');report.then(()=>recordAction('end',{session_id:session})).catch(()=>{});say(d.reason==='accessibility'?'请先在系统设置授予猫粮辅助功能权限，\n再重新打开挂件喵～':'监控模式未启动，人物未替换。\n已保留原版，请重试喵～');clearTimeout(timer);el('connection').textContent=d.reason==='accessibility'?'辅助功能权限不可用':d.reason==='hide_unconfirmed'?'原版窗口隐藏未确认':'原版人物暂停未确认';}
 };
 async function startRecording(){
  if(browserPreview)return;
@@ -336,11 +338,18 @@ async function startRecording(){
  }catch(e){say(e.message);}
 }
 el('exitRecord').onclick=()=>{el('menu').hidden=true;return recordingActive?finishRecording():startRecording();};
+let launcherToggleBusy=false;
+window.catfoodToggleMonitoring=async()=>{
+ if(browserPreview||launcherToggleBusy||exiting)return;
+ launcherToggleBusy=true;
+ try{if(!csrf)throw Error('正在连接猫粮，请稍后再试喵～');return await(recordingActive?finishRecording():startRecording());}
+ finally{launcherToggleBusy=false;native('toggleSettled');}
+};
 el('historyToggle').onclick=()=>{closeContextMenus();el('outfitPanel').hidden=true;el('historyPanel').hidden=false;recordAction('status').catch(()=>{});};el('closeHistory').onclick=()=>el('historyPanel').hidden=true;
 async function retryMemory(){const d=await recordAction('retry');if(d)say(d.pending_memory?'互动已保存，正在重试记忆同步喵～':'已写入 YUI 的记忆喵～');}
 el('retryMemory').onclick=()=>{el('menu').hidden=true;retryMemory().catch(()=>{});};el('historyRetry').onclick=()=>retryMemory().catch(()=>{});
 document.body.classList.add('record-inactive');
-const beginRecording=setInterval(async()=>{if(!csrf)return;clearInterval(beginRecording);try{const d=await recordAction('status');if(browserPreview)return;if(d?.active){requestNativeTakeover();}else if(!d?.initialized)await startRecording();}catch{}},200);
+const beginRecording=setInterval(async()=>{if(!csrf)return;clearInterval(beginRecording);try{const d=await recordAction('status');if(browserPreview)return;if(d?.active){requestNativeTakeover();}else if(!d?.initialized&&!window.catfoodLauncherOnly)await startRecording();}catch{}},200);
 let recordPollBusy=false;setInterval(async()=>{if(!csrf||exiting||recordPollBusy)return;recordPollBusy=true;try{const wasActive=recordingActive;const d=await recordAction('status');if(!browserPreview&&d?.active&&!wasActive){document.body.classList.add('record-inactive');if(!requestNativeTakeover())await recordAction('end');}}catch{}finally{recordPollBusy=false;}},1000);
 
 window.addEventListener('catfood:musicbeat',()=>{bounce('character');});
