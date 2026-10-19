@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .codex_quota import read_quota
+from .desktop_quota import NavigationBusy
 from .desktop_quota import read_quota as read_desktop_quota
 from .harness_bridge import read_balance as read_harness_balance
 from .providers import query, validate_endpoint
@@ -72,6 +73,7 @@ class Monitor:
         self.thread = None
         self.last_attempt = 0
         self.last_alert = 0
+        self.trae_watcher = None
         self.config = {
             "source": "deepseek",
             "model": "",
@@ -282,7 +284,7 @@ class Monitor:
                 else None,
             }
 
-    def refresh(self):
+    def refresh(self, *, app_open=False):
         # Serialize refreshes and key changes; never send a stale key's results to a new account.
         with self.lock:
             if self.config["source"] == "codex":
@@ -306,12 +308,16 @@ class Monitor:
                         pass
                 return self.snapshot()
             if self.config["source"] == "desktop_quota" and self.config["quota_mode"] == "auto":
-                if self.last_attempt and time.monotonic() - self.last_attempt < 60:
+                if not app_open and self.last_attempt and time.monotonic() - self.last_attempt < 60:
                     return self.snapshot()
+                previous_attempt = self.last_attempt
                 self.last_attempt = time.monotonic()
                 try:
                     quota = read_desktop_quota(self.config["desktop_app"])
                     self.state = {"account_quota": quota, "updated_at": time.time(), "error": None, "basis": quota["basis"]}
+                except NavigationBusy:
+                    self.last_attempt = previous_attempt
+                    return self.snapshot()
                 except Exception as exc:
                     self.state["error"] = str(exc) if isinstance(exc, ValueError) else "本机额度读取失败"
                 self.write("state.json", self.state)
@@ -385,6 +391,19 @@ class Monitor:
             return snapshot
 
     def start(self):
+        if (self.config['source'] == 'desktop_quota' and self.config['desktop_app'] == 'trae'
+                and self.config['quota_mode'] == 'auto' and self.trae_watcher is None):
+            from .trae_watcher import TraeWatcher
+
+            def opened():
+                with self.lock:
+                    if (not self.stop.is_set() and self.config['source'] == 'desktop_quota'
+                            and self.config['desktop_app'] == 'trae' and self.config['quota_mode'] == 'auto'):
+                        self.write('trae-open.json', {'at': time.time(), 'event': self.trae_watcher.last_native_event})
+                        self.refresh(app_open=True)
+
+            self.trae_watcher = TraeWatcher(opened)
+            self.trae_watcher.start()
         if self.thread and self.thread.is_alive():
             return
 
@@ -398,5 +417,7 @@ class Monitor:
 
     def close(self):
         self.stop.set()
+        if self.trae_watcher:
+            self.trae_watcher.close()
         if self.thread:
             self.thread.join(14)

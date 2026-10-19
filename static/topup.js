@@ -5,7 +5,10 @@
  sheet.innerHTML='<header><h2 id="topupTitle">补充猫粮</h2><button id="topupClose" type="button" aria-label="关闭补充猫粮">×</button></header><section id="topupRoute"><strong id="topupRouteLabel"></strong><p id="topupRouteReason"></p><p id="topupRouteGuide"></p></section><p id="topupHint"></p><div id="topupLinks"></div><p id="topupStatus" role="status"></p><button id="topupRefresh" type="button">返回后刷新额度</button>';
  document.body.append(sheet);
  const el=id=>document.getElementById(id);
- let current=null,csrf='',owner=null;
+ let current=null,csrf='',owner=null,opening=false;
+ const notice=document.createElement('p');notice.id='topupNotice';notice.hidden=true;notice.setAttribute('role','status');document.body.append(notice);
+ let noticeTimer;
+ function notify(message){clearTimeout(noticeTimer);notice.textContent=message;notice.hidden=false;noticeTimer=setTimeout(()=>notice.hidden=true,7000);}
  const native=()=>!!(window.webkit?.messageHandlers?.nekoWidget||window.chrome?.webview);
  function close(){sheet.hidden=true;owner?.focus?.();}
  el('topupClose').onclick=close;
@@ -64,13 +67,24 @@
   sheet.hidden=false;el('topupClose').focus();
  }
  async function open(profile,name){
+  if(opening)return;
+  opening=true;
   owner=document.activeElement;
   try{
    const r=await fetch('/api/status');if(!r.ok)throw Error();const s=await r.json();csrf=s.csrf;
    const row=s.profiles?.find(p=>p.id===profile);
    const info=row?.topup||(s.profile===profile?s.topup:null);
+   if(info&&['application','website'].includes(info.routing?.kind)&&info.routing.target){
+    notify('正在打开补充猫粮入口喵～');
+    const response=await fetch('/api/topup',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({profile,target:'default'})});
+    const result=await response.json();
+    if(response.ok&&result.requested){close();notify(result.message||'已打开官方充值页面喵～');return;}
+    render(info,name||row?.name||profile);notice.hidden=true;
+    el('topupStatus').textContent=result.message||'未能打开默认入口，请选择备用入口喵～';return;
+   }
    render(info||{profile,entries:[],hint:'此来源尚无已核验的官方充值入口，请到实际服务商账户管理页查看。'},name||row?.name||profile);
   }catch{render({profile,entries:[],hint:'插件连接中断，暂时无法核对官方入口，请稍后重试喵～'},name);}
+  finally{opening=false;}
  }
  el('topupRefresh').onclick=async()=>{
   const button=el('topupRefresh');button.disabled=true;

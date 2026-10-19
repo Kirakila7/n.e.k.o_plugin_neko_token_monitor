@@ -5,11 +5,13 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .host_layout import HostLayout
 from .topup import open_official
 
 
 def start_server(monitor, port=48923, request_reply=None, agent_status=None, recording=None, takeover=None, rhythm=None, companion=None, official_opener=None, application_opener=None):
     csrf = secrets.token_urlsafe(32)
+    host_layout = HostLayout()
     reply_lock = threading.Lock()
     last_reply = [None]
 
@@ -58,8 +60,12 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
             if not self.allowed():
                 return self.send(403, {"error": "仅允许本机同源访问"})
             path = self.path.split("?")[0]
+            if path == "/api/host-layout":
+                return self.send(200, host_layout.snapshot())
             if path == "/api/status":
                 return self.send(200, dict(monitor.snapshot(), csrf=csrf))
+            if path == "/api/tracking":
+                return self.send(200, monitor.tracking())
             if path == "/api/agent":
                 return self.send(200, agent_status.snapshot() if agent_status else {"status": "unknown"})
             if path == "/api/rhythm":
@@ -166,9 +172,11 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                     return self.send(200, monitor.record_usage(body))
                 if self.path == "/api/select":
                     return self.send(200, monitor.select(body.get("profile")))
+                if self.path == "/api/tracking":
+                    return self.send(200, monitor.configure_tracking(body))
                 if self.path == "/api/config":
                     monitor.configure(body)
-                    return self.send(200, monitor.refresh())
+                    return self.send(200, monitor.refresh(profile=body.get("profile")) if hasattr(monitor, "tracking") else monitor.refresh())
                 if self.path == "/api/refresh":
                     return self.send(200, monitor.refresh())
                 if self.path == "/api/reply":

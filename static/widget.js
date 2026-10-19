@@ -65,12 +65,12 @@ function renderQuotaMood(){
 }
 function render(){
  if(!state)return;
- const c=state.config,q=quotaMood.quota(state);
+ const c=state.config,model=state.profiles?.find(p=>p.id===state.profile)?.name||c.model||'猫粮';
  el('heading').textContent='猫粮余额';el('amount').classList.remove('idle-label','token-amount');el('amount').title='';
  if(c.source==='desktop_quota'&&c.quota_mode!=='manual'){
   const remaining=state.account_quota?.remaining;
   el('amount').textContent=remaining!=null?remaining.toLocaleString('zh-CN',{maximumFractionDigits:2})+' 积分':'待读取';
-  el('detail').textContent=(c.model||'本机应用')+' · '+(state.stale?'上次面板数据':'本机用量页读数')+(q?' · 参考剩余 '+percentText(q.percent):' · 未设置总积分');
+  el('detail').textContent=model+' 额度剩余';
   el('connection').textContent=state.error||'以应用最新账单为准；总积分为自设参考';return;
  }
  if(c.source==='manual_quota'||c.source==='desktop_quota'){
@@ -78,26 +78,26 @@ function render(){
   el('amount').classList.toggle('token-amount',c.quota_unit==='token'&&hasValue);
   el('amount').textContent=hasValue?(c.quota_unit==='token'?tokenText(remaining):remaining.toLocaleString())+' '+c.quota_unit:'未填写';
   el('amount').title=hasValue?remaining.toLocaleString()+' '+c.quota_unit:'';
-  el('detail').textContent=(c.model||'额度')+' · 手动记录'+(q?' · 剩余 '+percentText(q.percent):' · 未设置总额度');
+  el('detail').textContent=model+' 额度剩余';
   el('connection').textContent=(c.quota_total!=null?'总额度 '+c.quota_total+' '+c.quota_unit+'\n':'')+(c.quota_reset?'重置备注 '+c.quota_reset:'不会自动扣减或重置');return;
  }
  if(c.source==='codex'){
   const windows=state.codex_quota?.windows||[];
   const w=windows.filter(x=>Number.isFinite(x.remaining)&&x.remaining>=0&&x.remaining<=100).sort((a,b)=>a.remaining-b.remaining)[0];
   el('amount').textContent=w?percentText(w.remaining):'待查询';
-  el('detail').textContent=w?(state.stale?'上次数据 · ':'')+'Codex '+w.label+'剩余':'Codex 套餐额度';
+  el('detail').textContent=w?'Codex '+w.label+'剩余':'Codex 额度剩余';
   el('connection').textContent=state.error||(w?'重置 '+new Date(w.resets_at*1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})+'\n'+windows.filter(x=>x!==w).map(x=>x.label+'剩余 '+x.remaining+'%').join('；'):'正在查询喵～');return;
  }
  if(c.source==='jev'){
   const u=state.reported_usage||{};
-  el('amount').textContent='未提供';el('detail').textContent='JEV 已记录 '+((u.input_tokens||0)+(u.output_tokens||0)).toLocaleString()+' token';
+  el('amount').textContent='未提供';el('detail').textContent='JEV 额度剩余';
   el('connection').textContent='输入 '+(u.input_tokens||0)+' · 输出 '+(u.output_tokens||0)+'\n仅本机上报用量';return;
  }
  const row=state.selected,sym=row?.currency==='USD'?'$':'¥',estimated=state.estimated_tokens;
  el('amount').classList.toggle('token-amount',mode==='token'&&estimated!=null);
  el('amount').textContent=mode==='token'?(estimated==null?'待估算':'≈ '+tokenText(estimated)+' token'):(row?sym+' '+Number(row.balance).toFixed(2):state.configured?'待查询':'未连接');
  el('amount').title=mode==='token'&&estimated!=null?'估算 '+estimated.toLocaleString()+' token':'';
- el('detail').textContent=(mode==='token'?'按自填单价估算':row?(state.stale?'上次数据 · ':'')+state.basis:'右键气泡设置账户')+(q?' · 剩余 '+percentText(q.percent):row?' · 未设置总额':'');
+ el('detail').textContent=model+(mode==='token'?' 预计 Token 剩余':['openai','anthropic','manual'].includes(c.source)?' 额度剩余':' 账户余额');
  el('connection').textContent=state.error?'查询失败\n保留上次结果':state.stale&&row?'上次数据\n等待更新':'';
 }
 function renderAgentCard(){
@@ -107,7 +107,13 @@ function renderAgentCard(){
   el('heading').textContent='当前 Agent：';el('amount').textContent=agentState==='busy'?(names.length===1?names[0]:names.length+' 个在工作'):agentState==='idle'?'空闲时段':'状态未连接';
   el('detail').textContent=agentState==='busy'?(names.join('、')+' · 正在工作'):agentState==='idle'?'Agent 没在忙，本喵陪你喵～':'暂时读不到 Agent 状态';
   el('amount').classList.toggle('idle-label',agentState==='idle');el('amount').classList.remove('token-amount');el('amount').title='';
- }else render();
+ }else{render();}
+ if(state.tracking){
+  el('thought').title=state.tracking.hint+' · 右键打开猫粮额度设置';
+  el('followForeground').setAttribute('aria-checked',String(state.tracking.mode==='auto'));
+  el('pinCurrentProfile').setAttribute('aria-checked',String(state.tracking.mode==='fixed'));
+  el('pinCurrentProfile').textContent='固定当前猫粮 · '+(state.config.model||state.profile);
+ }
 }
 function say(text){talk=true;el('readout').hidden=true;el('quip').hidden=false;el('quip').textContent=text;el('quip').classList.remove('fade');void el('quip').offsetWidth;el('quip').classList.add('fade');clearTimeout(timer);timer=setTimeout(restore,4200);}
 function restore(){clearTimeout(timer);talk=false;el('quip').hidden=true;el('readout').hidden=false;renderAgentCard();}
@@ -203,8 +209,15 @@ for(const id of ['menu','quotaMenu']){
 for(const [id,value] of [['balanceMode','balance'],['tokenMode','token']])el(id).onclick=()=>{mode=value;idleCard=false;localStorage.setItem('neko-budget-mode',mode);closeContextMenus();restore();};
 el('settings').onclick=()=>{closeContextMenus();openAccount();};
 el('topupOpen').onclick=()=>{closeContextMenus();if(state?.profile)window.CatfoodTopUp.open(state.profile);};
-async function update(refresh=false){try{const r=await fetch(refresh?'/api/refresh':'/api/status',refresh?{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'}:{});if(!r.ok)throw Error();state=await r.json();window.catfoodQuotaOnline=true;window.catfoodQuotaReadAt=Date.now();csrf=state.csrf||csrf;renderAgentCard();}catch{window.catfoodQuotaOnline=false;el('connection').textContent='插件连接中断';if(state){state.stale=true;state.estimated_tokens=null;renderQuotaMood();render();el('connection').textContent='插件连接中断';}}}
-el('refreshNow').onclick=()=>{closeContextMenus();update(true);};update();setInterval(()=>update(),15000);
+async function changeTracking(trackingMode){
+ if(!csrf||!state)return;closeContextMenus();
+ try{const r=await fetch('/api/tracking',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({mode:trackingMode,profile:state.profile})});if(!r.ok)throw Error();state=await r.json();idleCard=false;mode='balance';restore();}
+ catch{say('监测方式未能保存，请重试喵～');}
+}
+el('followForeground').onclick=()=>changeTracking('auto');el('pinCurrentProfile').onclick=()=>changeTracking('fixed');
+let updateBusy=false,refreshPending=false;
+async function update(refresh=false){if(updateBusy){refreshPending=refreshPending||refresh;return;}updateBusy=true;try{const r=await fetch(refresh?'/api/refresh':'/api/status',refresh?{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'}:{});if(!r.ok)throw Error();state=await r.json();window.catfoodQuotaOnline=true;window.catfoodQuotaReadAt=Date.now();csrf=state.csrf||csrf;renderAgentCard();}catch{window.catfoodQuotaOnline=false;el('connection').textContent='插件连接中断';if(state){state.stale=true;state.estimated_tokens=null;renderQuotaMood();render();el('connection').textContent='插件连接中断';}}finally{updateBusy=false;if(refreshPending){refreshPending=false;update(true);}}}
+el('refreshNow').onclick=()=>{closeContextMenus();update(true);};update();setInterval(()=>update(),1500);
 
 el('yuiReply').onclick=async()=>{el('menu').hidden=true;if(browserPreview)return;try{const r=await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'});const result=await r.json();if(!r.ok||!result.submitted)throw Error(result.error||'原软件暂时没有接收');say('已经叫她啦喵～\n请看 NEKO 的回应。');el('connection').textContent='是否出声由原软件语音设置决定';}catch(e){say(e.message);}};
 
@@ -299,7 +312,7 @@ let nativeTimer=null;
 function requestNativeTakeover(){
  if(takeoverConfirmed)return true;
  clearTimeout(nativeTimer);const session=recordingState?.id;
- nativeTimer=setTimeout(()=>{if(session===recordingState?.id&&recordingActive&&!takeoverConfirmed)window.catfoodNativeState({active:true,ok:false,reason:'timeout',session_id:session});},18000);
+ nativeTimer=setTimeout(()=>{if(session===recordingState?.id&&recordingActive&&!takeoverConfirmed)window.catfoodNativeState({active:true,ok:false,reason:'timeout',session_id:session});},38000);
  if(native('recordStart'))return true;
  clearTimeout(nativeTimer);return false;
 }

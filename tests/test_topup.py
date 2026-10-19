@@ -46,7 +46,8 @@ def test_all_profiles_have_explicit_official_or_unknown_entry():
             assert url.scheme == "https" and url.hostname == row["domain"]
             assert not url.username and not url.password and not url.query and not url.fragment
             assert topup.destination(key, row["id"]) == row
-    assert set(missing) == {"jev", "manual", "custom"}
+    assert set(missing) == {"jev", "manual", "custom", "deepseek_chat"}
+    assert topup.info("deepseek_chat")["routing"]["kind"] == "unavailable"
     assert len(topup.LINKS) == 19
     assert topup.info("custom")["entries"] == []
 

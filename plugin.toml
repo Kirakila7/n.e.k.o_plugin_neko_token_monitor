@@ -1,9 +1,9 @@
 [plugin]
 id = "neko_token_monitor"
 name = "猫粮"
-description = "YUI 桌面猫粮挂件：支持 DeepSeek Harness 账户余额与应用内充值、TRAE/WorkBuddy 本机积分面板（macOS）、DeepSeek/Kimi API 余额、Qwen 阿里云账户额度、Codex 套餐、GPT/Claude 预算及手动积分记录；配合脸色、跳动、追逐、互动记忆和低粮提醒。各来源标明自动/手动与数据是否过期。"
+description = "YUI 桌面猫粮挂件：可自动跟随 macOS 前台平台或固定监测；支持 DeepSeek 网页/API/Harness、Codex 套餐、TRAE/WorkBuddy 积分面板、Kimi API、Qwen 云账户、GPT/Claude 预算及手动额度。气泡精简显示余额与额度剩余，详细来源和数据状态在设置中说明；保留追逐、互动记忆和低粮提醒。"
 short_description = "YUI companion with configurable balance sources and explicitly estimated budgets."
-version = "0.8.26"
+version = "0.8.27"
 entry = "plugin.plugins.neko_token_monitor:NekoTokenMonitorPlugin"
 
 [plugin.author]

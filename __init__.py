@@ -4,7 +4,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from plugin.sdk.plugin import NekoPluginBase, Ok, lifecycle, llm_tool, neko_plugin, plugin_entry
+from plugin.sdk.plugin import (
+    NekoPluginBase,
+    Ok,
+    lifecycle,
+    llm_tool,
+    neko_plugin,
+    plugin_entry,
+)
 
 from .agent_status import AgentStatus
 from .chat_commands import balance_answer
@@ -14,6 +21,7 @@ from .recording import Recording
 from .rhythm import Rhythm
 from .server import start_server
 from .takeover import TakeoverState, companion_result
+from .widget_lifecycle import stop_widget
 
 
 @neko_plugin
@@ -137,15 +145,7 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
             if result.get("summary"):
                 self.announce(result["summary"])
         if self.widget and self.widget.poll() is None:
-            if sys.platform == "win32":
-                self.stop_file.touch()
-            else:
-                self.widget.terminate()
-            try:
-                await asyncio.to_thread(self.widget.wait, 3)
-            except subprocess.TimeoutExpired:
-                self.widget.kill()
-                await asyncio.to_thread(self.widget.wait)
+            await asyncio.to_thread(stop_widget, self.widget, sys.platform, getattr(self, "stop_file", None))
         self.widget = None
         if self.recording:
             await asyncio.to_thread(self.recording.close)
@@ -188,7 +188,7 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
         result = await asyncio.to_thread(self.start_companion)
         if result["takeover"] != "pending":
             return result
-        outcome = await asyncio.to_thread(self.takeover.wait, result["session_id"], 22)
+        outcome = await asyncio.to_thread(self.takeover.wait, result["session_id"], 42)
         state = self.recording.snapshot()
         if (not state.get("active") or state.get("id") != result["session_id"]) and (outcome is None or outcome.get("ok")):
             outcome = {"ok": False, "reason": "session_ended"}

@@ -3,6 +3,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #include <signal.h>
 #include <math.h>
+#import "host-layout.h"
 static volatile sig_atomic_t stopping=0;
 static void stopWidget(int signalNumber){stopping=1;}
 
@@ -67,6 +68,16 @@ static BOOL CatFoodRect(id value,NSRect *rect){
 @property NSInteger takeoverGeneration;
 @property CFAbsoluteTime takeoverStarted;
 @property BOOL takeoverReported;
+@property NSDictionary *hostLayout;
+@property BOOL hostLayoutLoading;
+@property CFAbsoluteTime hostLayoutRequestedAt;
+@property NSMutableDictionary<NSNumber *, NSNumber *> *hostHoverAttempts;
+@property NSMutableDictionary<NSNumber *, NSNumber *> *pauseVisibleSince;
+@property BOOL restoring;
+@property BOOL terminationPending;
+@property CFAbsoluteTime restoreStarted;
+@property NSMutableDictionary<NSNumber *, NSNumber *> *restoreAttemptTimes;
+@property NSMutableDictionary<NSNumber *, NSNumber *> *restoreConfirmations;
 @property NSString *sessionId;
 @property NSString *recordingDirectory;
 @property BOOL isolatedPreview;
@@ -98,8 +109,12 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     self.pausedApps=[NSMutableDictionary new];
     self.confirmedPausedApps=[NSMutableSet new];
     self.accessibilityHiddenApps=[NSMutableSet new];
+    self.pauseVisibleSince=[NSMutableDictionary new];
+    self.restoreAttemptTimes=[NSMutableDictionary new];
+    self.restoreConfirmations=[NSMutableDictionary new];
     self.pauseAttemptTimes=[NSMutableDictionary new];
     self.pauseAttemptCounts=[NSMutableDictionary new];
+    self.hostHoverAttempts=[NSMutableDictionary new];
     signal(SIGTERM,stopWidget);
     self.panel=[[InputPanel alloc] initWithContentRect:NSMakeRect(0,0,400,self.isolatedPreview?560:404) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
     self.panel.title=self.isolatedPreview?@"猫粮隔离测试":@"猫粮";
@@ -118,7 +133,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     [self.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:[self.base stringByAppendingString:@"/widget"]]]];
     [self.panel orderFrontRegardless];
     [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer){
-        if(stopping||(!self.isolatedPreview&&(getppid()!=self.parent||kill(self.parent,0)!=0)))[NSApp terminate:nil];
+        if((stopping||(!self.isolatedPreview&&(getppid()!=self.parent||kill(self.parent,0)!=0)))&&!self.terminationPending)[NSApp terminate:nil];
         else if(!self.isolatedPreview&&self.recording&&!self.retryScheduled)[self hideOriginal];
         if(self.chaseWanted&&CFAbsoluteTimeGetCurrent()-self.chaseLease>5)[self stopChase];
     }];
@@ -265,6 +280,9 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     Boolean settable=false;
     AXError check=AXUIElementIsAttributeSettable(host,kAXMinimizedAttribute,&settable);
     AXError result=(check==kAXErrorSuccess&&settable)?AXUIElementSetAttributeValue(host,kAXMinimizedAttribute,minimized?kCFBooleanTrue:kCFBooleanFalse):kAXErrorAttributeUnsupported;
+    // Electron acknowledges AX writes before its window state changes. Keep
+    // ownership of every accepted minimize, including delayed completions.
+    if(minimized&&result==kAXErrorSuccess)self.minimizedApps[@(app.processIdentifier)]=app;
     CFTypeRef actual=NULL;
     BOOL confirmed=result==kAXErrorSuccess&&AXUIElementCopyAttributeValue(host,kAXMinimizedAttribute,&actual)==kAXErrorSuccess&&actual&&CFGetTypeID(actual)==CFBooleanGetTypeID()&&CFBooleanGetValue(actual)==minimized;
     NSLog(@"CatFood window minimized=%d settable=%d check=%d result=%d confirmed=%d",minimized,settable,check,result,confirmed);
@@ -297,48 +315,46 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     }
     self.movedPointer=NO;
 }
-- (BOOL)revealHostControls:(AXUIElementRef)element app:(NSRunningApplication *)app depth:(NSUInteger)depth {
-    if(depth>24)return NO;
-    CFTypeRef role=NULL,position=NULL,size=NULL;
-    AXUIElementCopyAttributeValue(element,kAXRoleAttribute,&role);
-    BOOL image=role&&CFGetTypeID(role)==CFStringGetTypeID()&&CFEqual(role,kAXImageRole);
-    if(role)CFRelease(role);
-    if(image){
-        AXUIElementCopyAttributeValue(element,kAXPositionAttribute,&position);
-        AXUIElementCopyAttributeValue(element,kAXSizeAttribute,&size);
-        CGPoint p;CGSize z;
-        BOOL valid=position&&size&&CFGetTypeID(position)==AXValueGetTypeID()&&CFGetTypeID(size)==AXValueGetTypeID()
-            &&AXValueGetValue(position,kAXValueCGPointType,&p)&&AXValueGetValue(size,kAXValueCGSizeType,&z)&&z.width>80&&z.height>100;
-        if(position)CFRelease(position);if(size)CFRelease(size);
-        if(valid){
-            // The toolbar follows the real cursor. Delivering a synthetic move only to
-            // Electron's process does not reveal it; briefly pass mouse events through
-            // our panel and restore the user's cursor after the takeover attempt.
-            if(!self.movedPointer){
-                CGEventRef current=CGEventCreate(NULL);
-                if(current){self.savedPointer=CGEventGetLocation(current);CFRelease(current);self.movedPointer=YES;}
-            }
-            self.panel.ignoresMouseEvents=YES;
-            [app activateWithOptions:0];
-            // NEKO's AX image is the full-screen canvas, while YUI stands at its
-            // right edge. Hover the character area rather than the canvas center.
-            CGPoint target=CGPointMake(p.x+z.width*0.89,p.y+z.height*0.30);
-            for(CGFloat shift=-180;shift<=0;shift+=180){
-                CGPoint at=CGPointMake(target.x+shift,target.y);
-                CGEventRef event=CGEventCreateMouseEvent(NULL,kCGEventMouseMoved,at,kCGMouseButtonLeft);
-                if(event){CGEventPost(kCGHIDEventTap,event);CFRelease(event);}
-            }
-            self.lastHoverPoint=target;
-            NSLog(@"CatFood requested visible host hover pid=%d canvas=(%.0f,%.0f %.0fx%.0f) at=(%.0f,%.0f)",app.processIdentifier,p.x,p.y,z.width,z.height,target.x,target.y);return YES;
-        }
+- (void)refreshHostLayout {
+    if(self.hostLayoutLoading||CFAbsoluteTimeGetCurrent()-self.hostLayoutRequestedAt<1.0)return;
+    self.hostLayoutLoading=YES;self.hostLayoutRequestedAt=CFAbsoluteTimeGetCurrent();
+    NSInteger generation=self.takeoverGeneration;
+    NSURLRequest *request=[NSURLRequest requestWithURL:[NSURL URLWithString:[self.base stringByAppendingString:@"/api/host-layout"]]
+                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:2.5];
+    [[NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
+        id value=(!error&&data.length<16384)?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(generation!=self.takeoverGeneration)return;
+            self.hostLayoutLoading=NO;
+            self.hostLayout=[value isKindOfClass:NSDictionary.class]&&[value[@"available"]isEqual:@YES]?value:nil;
+        });
+    }] resume];
+}
+- (BOOL)revealHostControls:(AXUIElementRef)host app:(NSRunningApplication *)app {
+    if(!self.hostLayout)[self refreshHostLayout];
+    CFTypeRef position=NULL,size=NULL;
+    AXUIElementCopyAttributeValue(host,kAXPositionAttribute,&position);
+    AXUIElementCopyAttributeValue(host,kAXSizeAttribute,&size);
+    CGPoint p=CGPointZero,target;CGSize z=CGSizeZero;
+    BOOL valid=position&&size&&CFGetTypeID(position)==AXValueGetTypeID()&&CFGetTypeID(size)==AXValueGetTypeID()
+        &&AXValueGetValue(position,kAXValueCGPointType,&p)&&AXValueGetValue(size,kAXValueCGSizeType,&z);
+    if(position)CFRelease(position);if(size)CFRelease(size);
+    NSNumber *pid=@(app.processIdentifier);NSUInteger attempt=self.hostHoverAttempts[pid].unsignedIntegerValue;
+    BOOL saved=valid&&attempt<5&&CatFoodHostHoverPoint(self.hostLayout,(CGRect){p,z},attempt,&target);
+    if(!valid||(!saved&&!CatFoodHostSearchPoint(self.hostLayout,(CGRect){p,z},attempt>=5?attempt-5:attempt,&target)))return NO;
+    self.hostHoverAttempts[pid]=@(attempt+1);
+    if(!self.movedPointer){
+        CGEventRef current=CGEventCreate(NULL);
+        if(current){self.savedPointer=CGEventGetLocation(current);CFRelease(current);self.movedPointer=YES;}
     }
-    CFTypeRef children=NULL;
-    if(AXUIElementCopyAttributeValue(element,kAXChildrenAttribute,&children)!=kAXErrorSuccess||!children)return NO;
-    BOOL result=NO;
-    if(CFGetTypeID(children)==CFArrayGetTypeID())for(id child in (__bridge NSArray *)children){
-        if([self revealHostControls:(__bridge AXUIElementRef)child app:app depth:depth+1]){result=YES;break;}
+    self.panel.ignoresMouseEvents=YES;[app activateWithOptions:0];
+    for(CGFloat shift=-2;shift<=0;shift+=2){
+        CGEventRef event=CGEventCreateMouseEvent(NULL,kCGEventMouseMoved,CGPointMake(target.x+shift,target.y),kCGMouseButtonLeft);
+        if(event){CGEventPost(kCGHIDEventTap,event);CFRelease(event);}
     }
-    CFRelease(children);return result;
+    self.lastHoverPoint=target;
+    NSLog(@"CatFood %@ hover pid=%d frame=(%.0f,%.0f %.0fx%.0f) at=(%.0f,%.0f)",saved?@"saved-layout":@"window-search",app.processIdentifier,p.x,p.y,z.width,z.height,target.x,target.y);
+    return YES;
 }
 - (BOOL)hostControl:(NSString *)label app:(NSRunningApplication *)app press:(BOOL)press {
     if(!AXIsProcessTrusted()||![self isNeko:app]||app.terminated)return NO;
@@ -347,7 +363,6 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     AXUIElementRef host=[self mainHostWindow:root];
     AXUIElementRef control=[self findControl:label root:host depth:0];
     BOOL result=control!=NULL;
-    if(!control){AXUIElementPerformAction(host,kAXRaiseAction);[self revealHostControls:host app:app depth:0];}
     if(control&&press){
         AXError status=AXUIElementPerformAction(control,kAXPressAction);
         if(status!=kAXErrorSuccess){
@@ -362,7 +377,11 @@ static BOOL CatFoodRect(id value,NSRect *rect){
 }
 - (BOOL)pauseOriginal:(NSRunningApplication *)app {
     NSNumber *pid=@(app.processIdentifier);
-    if([self hostControl:@"请她回来" app:app press:NO])return YES;
+    if([self hostControl:@"请她回来" app:app press:NO]){
+        if(!self.pauseVisibleSince[pid])self.pauseVisibleSince[pid]=@(CFAbsoluteTimeGetCurrent());
+        return CFAbsoluteTimeGetCurrent()-self.pauseVisibleSince[pid].doubleValue>=1.2;
+    }
+    [self.pauseVisibleSince removeObjectForKey:pid];
     // AXPress can be accepted while NEKO ignores the click during another transition.
     // Retry only the goodbye control, never a toggle or a visible return control.
     CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
@@ -374,6 +393,10 @@ static BOOL CatFoodRect(id value,NSRect *rect){
         self.pauseAttemptCounts[pid]=@(self.pauseAttemptCounts[pid].integerValue+1);
         return [self hostControl:@"请她回来" app:app press:NO];
     }
+    AXUIElementRef root=AXUIElementCreateApplication(app.processIdentifier);
+    AXUIElementRef host=[self mainHostWindow:root];
+    AXUIElementPerformAction(host,kAXRaiseAction);[self revealHostControls:host app:app];
+    CFRelease(host);CFRelease(root);
     return NO;
 }
 - (void)hideOriginal {
@@ -404,10 +427,11 @@ static BOOL CatFoodRect(id value,NSRect *rect){
             }
         }
     }
-    if((!ok||found==0)&&CFAbsoluteTimeGetCurrent()-self.takeoverStarted<14.0){
+    if((!ok||found==0)&&CFAbsoluteTimeGetCurrent()-self.takeoverStarted<32.0){
         if(self.retryScheduled)return;
         self.retryScheduled=YES;NSInteger generation=self.takeoverGeneration;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.35*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        BOOL searching=self.hostHoverAttempts.allValues.count&&[[self.hostHoverAttempts.allValues valueForKeyPath:@"@max.self"]integerValue]>=5;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((searching?0.08:0.35)*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
             if(!self.recording||generation!=self.takeoverGeneration)return;
             self.retryScheduled=NO;[self hideOriginal];
         });
@@ -433,30 +457,66 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     [self persistRecordingEnd];
     [self stopChase];
     self.recording=NO;
+    if(self.restoring)return;
     self.takeoverGeneration++;self.retryScheduled=NO;self.takeoverStarted=0;self.takeoverReported=NO;
     if(self.isolatedPreview)return;
+    self.restoring=YES;self.restoreStarted=CFAbsoluteTimeGetCurrent();
     [self restorePointer];
+    [self.restoreAttemptTimes removeAllObjects];[self.restoreConfirmations removeAllObjects];
+    [self.hostHoverAttempts removeAllObjects];
     for(NSRunningApplication *app in self.hiddenApps.allValues)if(!app.terminated){
+        [app unhide];
         if([self.accessibilityHiddenApps containsObject:@(app.processIdentifier)])[self setAccessibilityHidden:NO app:app];
-        else [app unhide];
         if(self.minimizedApps[@(app.processIdentifier)])[self setHostWindowMinimized:NO app:app];
+        NSWorkspaceOpenConfiguration *configuration=[NSWorkspaceOpenConfiguration configuration];
+        configuration.activates=YES;configuration.createsNewApplicationInstance=NO;
+        if(app.bundleURL)[NSWorkspace.sharedWorkspace openApplicationAtURL:app.bundleURL configuration:configuration completionHandler:nil];
     }
-    [self.minimizedApps removeAllObjects];
-    [self.accessibilityHiddenApps removeAllObjects];
-    [self.hiddenApps removeAllObjects];
-    for(NSRunningApplication *app in self.pausedApps.allValues){
-        if(app.terminated)continue;
-        BOOL requested=NO,restored=NO;
-        for(NSInteger attempt=0;attempt<24;attempt++){
-            if([self hostControl:@"请她离开" app:app press:NO]){restored=YES;break;}
-            if(!requested)requested=[self hostControl:@"请她回来" app:app press:YES];
-            [NSThread sleepForTimeInterval:0.12];
+    [self restoreStep];
+}
+- (void)restoreStep {
+    if(!self.restoring)return;
+    NSMutableDictionary *targets=[self.hiddenApps mutableCopy];[targets addEntriesFromDictionary:self.pausedApps];
+    BOOL all=YES;CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
+    for(NSNumber *pid in targets){
+        NSRunningApplication *app=targets[pid];if(app.terminated)continue;
+        if(self.restoreConfirmations[pid].integerValue>=2)continue;
+        BOOL hidden=[self isHostHidden:app];
+        if(hidden){
+            [app unhide];
+            if([self.accessibilityHiddenApps containsObject:pid])[self setAccessibilityHidden:NO app:app];
+            if(self.minimizedApps[pid])[self setHostWindowMinimized:NO app:app];
         }
-        NSLog(@"CatFood restore pid=%d model_confirmed=%d",app.processIdentifier,restored);
+        AXUIElementRef root=AXUIElementCreateApplication(app.processIdentifier);
+        AXUIElementSetMessagingTimeout(root,0.5);
+        AXUIElementRef host=[self mainHostWindow:root];
+        AXUIElementPerformAction(host,kAXRaiseAction);
+        BOOL returned=[self hostControl:@"请她回来" app:app press:NO];
+        BOOL model=!self.pausedApps[pid]||(!returned&&[self hostControl:@"请她离开" app:app press:NO]);
+        if(!hidden&&model)self.restoreConfirmations[pid]=@(self.restoreConfirmations[pid].integerValue+1);
+        else{
+            self.restoreConfirmations[pid]=@0;
+            if(!hidden&&returned&&now-self.restoreAttemptTimes[pid].doubleValue>=1.5){
+                [self hostControl:@"请她回来" app:app press:YES];self.restoreAttemptTimes[pid]=@(now);
+            }else if(!hidden&&!returned)[self revealHostControls:host app:app];
+        }
+        CFRelease(host);CFRelease(root);
+        if(self.restoreConfirmations[pid].integerValue<2)all=NO;
     }
+    if(!all&&now-self.restoreStarted<24){
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self restoreStep];});return;
+    }
+    for(NSNumber *pid in targets)NSLog(@"CatFood restore pid=%@ window_confirmed=%d model_confirmed=%d",pid,![self isHostHidden:targets[pid]],self.restoreConfirmations[pid].integerValue>=2);
+    NSLog(@"CatFood restore result ok=%d seconds=%.3f",all,now-self.restoreStarted);
+    [self restorePointer];
+    [self.minimizedApps removeAllObjects];[self.accessibilityHiddenApps removeAllObjects];[self.hiddenApps removeAllObjects];
     [self.pausedApps removeAllObjects];
     [self.confirmedPausedApps removeAllObjects];
     [self.pauseAttemptTimes removeAllObjects];[self.pauseAttemptCounts removeAllObjects];
+    [self.pauseVisibleSince removeAllObjects];
+    [self.hostHoverAttempts removeAllObjects];self.hostLayout=nil;self.hostLayoutLoading=NO;self.hostLayoutRequestedAt=0;
+    self.restoring=NO;
+    if(self.terminationPending){self.terminationPending=NO;[NSApp replyToApplicationShouldTerminate:YES];}
 }
 - (void)persistRecordingEnd {
     if(!self.recordingDirectory||!self.sessionId||![[NSUUID alloc]initWithUUIDString:self.sessionId])return;
@@ -474,7 +534,15 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     [self.panel orderOut:nil];
     [NSApp terminate:nil];
 }
-- (void)applicationWillTerminate:(NSNotification *)notification {[self restoreOriginal];}
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    if(!self.isolatedPreview&&(self.restoring||self.hiddenApps.count||self.pausedApps.count)){
+        [self restoreOriginal];
+        if(self.restoring){self.terminationPending=YES;return NSTerminateLater;}
+        return NSTerminateNow;
+    }
+    [self persistRecordingEnd];[self stopChase];return NSTerminateNow;
+}
+- (void)applicationWillTerminate:(NSNotification *)notification {[self persistRecordingEnd];[self stopChase];}
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
     if(!message.frameInfo.isMainFrame||![message.frameInfo.securityOrigin.host isEqualToString:@"127.0.0.1"]||message.frameInfo.securityOrigin.port!=self.serverPort)return;
     NSString *action=nil,*session=nil;
@@ -527,11 +595,13 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     }
     if([action isEqualToString:@"settings"])[NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:self.base]];
     else if([action isEqualToString:@"recordStart"]){
+        if(self.restoring){[self reportNativeState:NO reason:@"restore_in_progress"];return;}
         // Status polling and initial page load can both request the same session.
         // Retrying a completed takeover would activate and unhide NEKO again.
         if(self.recording&&(!session||[session isEqualToString:self.sessionId]))return;
-        if(self.recording)[self restoreOriginal];
+        if(self.recording){[self restoreOriginal];return;}
         self.sessionId=session;self.takeoverGeneration++;
+        self.hostLayout=nil;self.hostLayoutLoading=NO;self.hostLayoutRequestedAt=0;[self.hostHoverAttempts removeAllObjects];
         self.takeoverStarted=0;self.takeoverReported=NO;
         if(self.isolatedPreview){self.recording=YES;self.takeoverReported=YES;[self reportNativeState:YES reason:nil];return;}
         if(!AXIsProcessTrusted()){

@@ -1,6 +1,6 @@
 <!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>猫粮</title><link rel="stylesheet" href="/widget.css"><link rel="stylesheet" href="/chase.css">
 <main id="companion"><div id="recordBar"><span id="recordCounts" role="status">读取记录中…</span></div><section id="historyPanel" hidden><header><h2>互动记录</h2><button id="closeHistory">返回</button></header><p id="historyTotals"></p><p id="memoryStatus"></p><p>Agent 与数据状态只保存在本机记录中。</p><button id="historyRetry">重试写入 YUI 记忆</button><div id="historyRows"></div></section><div id="pet">
-<button id="thought" aria-label="切换猫粮余额和空闲时间，右键打开额度设置" aria-haspopup="menu" aria-controls="quotaMenu" aria-expanded="false" title="右键打开猫粮额度设置"><div id="readout"><div class="title" id="heading">猫粮余额</div><div id="amount">未连接</div><div id="detail">右键气泡设置账户</div></div><div id="quip" hidden></div></button>
+<button id="thought" aria-label="切换猫粮余额和空闲时间，右键打开额度设置" aria-haspopup="menu" aria-controls="quotaMenu" aria-expanded="false" title="右键打开猫粮额度设置"><div id="readout"><div class="title" id="heading">猫粮余额</div><div id="amount">未连接</div><div id="detail"></div></div><div id="quip" hidden></div></button>
 <i class="dot one"></i><i class="dot two"></i>
 <span id="returnSpot" aria-hidden="true"></span>
 
@@ -11,6 +11,8 @@
 <nav id="quotaMenu" class="contextMenu" role="menu" aria-label="猫粮额度设置" hidden>
  <h2>猫粮额度设置</h2>
  <section class="menuGroup" role="group" aria-label="气泡显示"><h3>气泡显示</h3>
+  <button id="followForeground" role="menuitemradio" aria-checked="true" type="button">自动跟随前台应用 / 页面</button>
+  <button id="pinCurrentProfile" role="menuitemradio" aria-checked="false" type="button">固定当前猫粮</button>
   <button id="balanceMode" role="menuitem" type="button">显示猫粮余额</button>
   <button id="tokenMode" role="menuitem" type="button">显示估算 token</button>
  </section>

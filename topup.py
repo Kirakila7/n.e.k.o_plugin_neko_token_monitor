@@ -74,6 +74,11 @@ def routing(profile, application):
 
 def info(profile):
     application = app_topup.info(profile)
+    if profile == 'deepseek_chat':
+        return {'profile': profile, 'entries': [], 'application': None,
+                'routing': {'kind': 'unavailable', 'target': None, 'label': '聊天产品独立管理',
+                            'reason': '网页聊天与开放平台 API 不是同一额度，不代你跳转 API 充值。'},
+                'hint': '此处只记录 DeepSeek 网页聊天产品的额度；未接入自动查询或独立充值入口，不显示 API 钱包余额。'}
     return {'profile': profile, 'entries': copy.deepcopy(LINKS.get(profile, [])),
             'application': application, 'routing': routing(profile, application),
             'hint': '选择应用内入口或官方网页；请自行完成支付。返回后刷新额度，手动记录需自行校正。' if application else
@@ -102,6 +107,12 @@ def open_url(url):
 
 
 def open_official(profile, target, opener=None, application_opener=None):
+    if target == 'default':
+        route = info(profile)['routing']
+        if route['kind'] in ('choice', 'unavailable'):
+            return {'requested': False, 'choice_required': route['kind'] == 'choice',
+                    'payment_confirmed': False, 'profile': profile}
+        target = route['target']
     if target == 'application':
         return app_topup.open_application(profile, application_opener)
     item = destination(profile, target)

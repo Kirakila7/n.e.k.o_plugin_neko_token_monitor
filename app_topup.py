@@ -2,12 +2,11 @@
 import json
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
+from .app_navigation import LOCK as _lock
 from .harness_bridge import open_topup
 
-_lock = threading.Lock()
 _errors = {
     'unsupported': '此平台暂未接入应用内入口，请使用下方官网入口喵～',
     'permission': '应用内入口需要 macOS 辅助功能权限；请在系统设置中授权实际运行猫粮的程序，或使用下方官网入口喵～',
