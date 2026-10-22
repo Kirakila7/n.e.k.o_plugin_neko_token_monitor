@@ -116,7 +116,8 @@ try:
         (Path(directory) / "stop").unlink()
         widget = subprocess.Popen([str(executable), str(os.getpid()), f"http://127.0.0.1:{server.server_port}", str(Path(directory) / "stop")])
         wait_for(lambda: all(not user.IsWindowVisible(w) for w in targets), "third takeover failed")
-        widget.kill();widget.wait(timeout=10)
+        widget.kill()
+        widget.wait(timeout=10)
         phase = "end"
         widget = subprocess.Popen([str(executable), str(os.getpid()), f"http://127.0.0.1:{server.server_port}", str(Path(directory) / "stop"), "--launcher-only"])
         wait_for(lambda: all(user.IsWindowVisible(w) for w in targets), "crash recovery did not restore host")
