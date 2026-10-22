@@ -53,7 +53,7 @@ class Recording:
         raw = None
         for path in (self.path, self.path.with_suffix(".bak")):
             try:
-                raw = json.loads(path.read_text())
+                raw = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(raw, dict):
                     raise ValueError()
                 break
@@ -77,7 +77,7 @@ class Recording:
         for path in (self.path, self.path.with_suffix(".bak")):
             temporary = path.with_suffix(path.suffix + ".tmp")
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as stream:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -231,7 +231,7 @@ class Recording:
                     identifier = path.name.removeprefix("closed-").removesuffix(".json")
                     if str(uuid.UUID(identifier)) != identifier:
                         continue
-                    marker = json.loads(path.read_text())
+                    marker = json.loads(path.read_text(encoding="utf-8"))
                     if not isinstance(marker, dict) or marker.get("session_id") != identifier:
                         continue
                     target = next((row for row in self.data["sessions"] if row["id"] == identifier), None)

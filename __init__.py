@@ -54,7 +54,10 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
             executable = Path(__file__).parent / "bin" / "windows" / "CatFood.exe"
             self.stop_file = Path(self.data_path("widget.stop"))
             self.stop_file.unlink(missing_ok=True)
-            arguments = [str(executable), str(os.getpid()), "http://127.0.0.1:48923", str(self.stop_file)]
+            arguments = [str(executable), str(os.getpid()), "http://127.0.0.1:48923", str(self.stop_file),
+                         "--recording-dir", str(self.recording.path.parent)]
+            if not self.recording.snapshot().get("active"):
+                arguments.append("--launcher-only")
         else:
             executable.chmod(executable.stat().st_mode | 0o100)
         self.logger.info("Budget widget: launching native window")
@@ -130,7 +133,7 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
             snapshot = self.recording.snapshot()
             if snapshot.get("active"):
                 self.takeover.begin(snapshot["id"])
-            show = sys.platform == "darwin" or snapshot.get("active") or not snapshot.get("initialized")
+            show = sys.platform in ("darwin", "win32") or snapshot.get("active") or not snapshot.get("initialized")
             widget = self.show_widget() if show else {"shown": False, "reason": "已退出记录模式；可从插件入口再次打开"}
         except OSError:
             widget = {"shown": False, "reason": "桌面挂件未能启动，请查看插件面板"}

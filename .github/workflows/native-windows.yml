@@ -2,7 +2,7 @@ name: Build Windows widget
 on:
   workflow_dispatch:
   push:
-    paths: ['native/windows/**', '.github/workflows/native-windows.yml']
+    paths: ['native/windows/**', 'static/widget.js', '__init__.py', 'recording.py', 'bin/windows/**', '.github/workflows/native-windows.yml']
 permissions:
   contents: read
 jobs:
@@ -16,6 +16,12 @@ jobs:
       - run: dotnet build native/windows/CatFood.csproj -c Release -o out
       - run: python native/windows/smoke.py
       - run: python native/windows/lifecycle_smoke.py
+      - run: python native/windows/lifecycle_smoke.py
+      - name: Write build identity
+        shell: pwsh
+        run: |
+          @{source_commit=$env:GITHUB_SHA; platform='windows-x64'; lifecycle_runs=2} | ConvertTo-Json | Set-Content out/build-info.json -Encoding utf8
+          Get-FileHash out/CatFood.exe -Algorithm SHA256 | Format-List
       - uses: actions/upload-artifact@v4
         with:
           name: windows-widget

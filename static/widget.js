@@ -4,7 +4,7 @@ if(browserPreview)document.body.classList.add('browser-preview');
 let companionPosition=null;
 let launcherLayoutKey='';
 function reportLauncherLayout(){
- const bridge=window.webkit?.messageHandlers?.nekoWidget;if(!bridge)return;
+ const bridge=window.webkit?.messageHandlers?.nekoWidget||window.chrome?.webview;if(!bridge)return;
  const rect=el('thought').getBoundingClientRect();if(!rect.width||!rect.height)return;
  const bounds={x:rect.x,y:rect.y,width:rect.width,height:rect.height},key=JSON.stringify(bounds);
  if(key===launcherLayoutKey)return;launcherLayoutKey=key;bridge.postMessage({action:'launcherLayout',rect:bounds});
@@ -32,7 +32,7 @@ function setRecordBarVisible(visible,persist=true){
 }
 el('recordVisibilityToggle').onclick=()=>setRecordBarVisible(!recordBarVisible);
 setRecordBarVisible(recordBarVisible,false);
-function native(action){const bridge=window.webkit?.messageHandlers?.nekoWidget;if(bridge){bridge.postMessage(['recordStart','recordEnd'].includes(action)?{action,session_id:recordingState?.id}:action);return true;}if(window.chrome?.webview){window.chrome.webview.postMessage(action);return true;}return false;}
+function native(action){const bridge=window.webkit?.messageHandlers?.nekoWidget||window.chrome?.webview;if(!bridge)return false;bridge.postMessage(['recordStart','recordEnd'].includes(action)?{action,session_id:recordingState?.id}:action);return true;}
 let agentState='unknown',agentData=null,idleCard=false;
 const wardrobe=window.CatfoodWardrobe;
 let outfitMode='auto',fixedOutfit='original',requestedOutfit=null,outfitRevision=0;
