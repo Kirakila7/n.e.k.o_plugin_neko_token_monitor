@@ -21,7 +21,7 @@ def normalize(payload):
         if not isinstance(item, dict):
             continue
         used, minutes, reset = (item.get(k) for k in ("usedPercent", "windowDurationMins", "resetsAt"))
-        if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used) or not 0 <= used <= 100:
             continue
         if type(minutes) is not int or minutes <= 0 or type(reset) is not int:
             continue

@@ -13,6 +13,7 @@ def companion_result(outcome):
         "accessibility": "辅助功能权限不可用，请在系统设置中允许猫粮",
         "host_not_found": "没有找到运行中的 N.E.K.O 原版窗口",
         "pause_unconfirmed": "未确认原版人物已经暂停",
+        "controls_unavailable": "原版工具栏暂不可用，已取消接管并保留原版人物",
         "hide_unconfirmed": "未确认原版窗口已经隐藏",
         "timeout": "等待人物替换确认超时",
         "session_ended": "本次记录已经结束，原版人物已恢复",

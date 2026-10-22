@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
+from .diary import build_diary, parsed
+
 
 def now():
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -87,7 +89,7 @@ class Recording:
             sessions = self.data["sessions"]
             current = sessions[-1] if sessions else {"active": False}
             def clean(row):
-                return {k: v for k, v in row.items() if k != "events"}
+                return {k: v for k, v in row.items() if k not in ("events", "interaction_events")}
             return dict(
                 clean(current),
                 initialized=bool(sessions),
@@ -105,7 +107,7 @@ class Recording:
                 error=self.load_error,
             )
 
-    def action(self, action, event_id=None, session_id=None, kind=None, message=None, quota=None):
+    def action(self, action, event_id=None, session_id=None, kind=None, message=None, quota=None, at=None):
         self.reconcile_ends()
         if action not in ("start", "pet", "ask", "note", "game", "end", "status", "retry"):
             raise ValueError("Unknown recording action")
@@ -126,7 +128,7 @@ class Recording:
             sessions = self.data["sessions"]
             current = sessions[-1] if sessions else None
             if action == "start" and not (current and current.get("active")):
-                current = dict(active=True, id=str(uuid.uuid4()), start=now(), pet=0, ask=0, events=[], character_name=self.character_name)
+                current = dict(active=True, id=str(uuid.uuid4()), start=now(), pet=0, ask=0, events=[], character_name=self.character_name, diary_version=1)
                 sessions.append(current)
             elif action in ("pet", "ask"):
                 # Replayed clicks are attributed to their original session, even after a crash/exit.
@@ -134,7 +136,15 @@ class Recording:
                 if target and (target.get("active") or session_id):
                     seen = target.setdefault("events", [])
                     if not event_id or event_id not in seen:
+                        if at is not None:
+                            point, received, start, end = parsed(at), parsed(now()), parsed(target.get("start")), parsed(target.get("end"))
+                            if (point is None or received is None or point.timestamp() > received.timestamp() + 300
+                                    or start is not None and point.timestamp() < start.timestamp() - 300
+                                    or end is not None and point.timestamp() > end.timestamp() + 300):
+                                raise ValueError("Invalid click timestamp")
                         target[action] = target.get(action, 0) + 1
+                        if at is not None:
+                            target.setdefault("interaction_events", []).append({"kind": action, "at": at})
                         if event_id:
                             seen.append(event_id)
                         if target.get("summary"):
@@ -187,6 +197,27 @@ class Recording:
         row.update(active=False, end=now(), memory_saved=False)
         row["summary"] = self.summary(row)
         row["memory_revision"] = row.get("memory_revision", 0) + 1
+
+    def mark_presence(self, session_id):
+        with self.lock:
+            current = self.data["sessions"][-1] if self.data["sessions"] else {}
+            if self.load_error or not current.get("active") or current.get("id") != session_id:
+                return False
+            if not current.get("presence_start"):
+                current["presence_start"] = now()
+                self.save()
+            return True
+
+    def diary(self):
+        self.reconcile_ends()
+        with self.lock:
+            result = build_diary(self.data["sessions"], self.data["observations"])
+            result["technical"] = [
+                {key: copy.deepcopy(row.get(key)) for key in ("id", "start", "end", "active", "memory_saved", "memory_error", "status_events")}
+                for row in reversed(self.data["sessions"][-30:])
+            ]
+            result["deliveries"] = [{"at": row["start"], "text": row["summary"]} for row in self.data["observations"][-60:] if row.get("kind") == "yui_dialogue"]
+            return result
 
     def reconcile_ends(self):
         """Native exit markers survive a dead WebKit page or unavailable HTTP transport."""

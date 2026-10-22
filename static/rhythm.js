@@ -34,7 +34,7 @@
   finally{busy=false;}
  }
  function animate(now){
-  const visible=shown&&!reduced.matches&&!document.body.classList.contains('record-inactive')&&!document.body.classList.contains('music-active')&&!get('character').matches(':active');
+  const visible=shown&&!reduced.matches&&!document.body.classList.contains('record-inactive')&&!get('character').matches(':active');
   const p=clock.frame(now,visible);
   pose.style.transform=`translateY(${-p.lift}px) scale(${p.scaleX},${p.scaleY}) rotate(${p.rotate}deg)`;
   frameId=requestAnimationFrame(animate);
@@ -46,8 +46,6 @@
  get('rhythmAuto').onclick=()=>command('auto');
  get('rhythmStrength').onchange=()=>command('strength',{strength:Number(get('rhythmStrength').value)});
  window.addEventListener('catfood:recordend',()=>{get('rhythmPanel').hidden=true;command('stop');});
- // Built-in melody playback yields to the clicked rhythm performer.
- window.addEventListener('catfood:musicbeat',()=>clock.accept(null,performance.now()));
  document.addEventListener('visibilitychange',()=>{
   shown=document.visibilityState!=='hidden';
   if(!shown){clock.accept(null,performance.now());cancelAnimationFrame(frameId);pose.style.transform='none';if(state?.enabled)command('stop');}

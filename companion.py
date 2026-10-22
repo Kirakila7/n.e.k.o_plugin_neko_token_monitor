@@ -5,6 +5,8 @@ import math
 import os
 import threading
 import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from .recording import quota_text
@@ -24,6 +26,14 @@ def quota_snapshot(state):
     """Allowlisted facts only. Never put account secrets/endpoints in memory or prompts."""
     cfg = state.get("config", {})
     source = cfg.get("source", "")
+    a = state.get('allowance')
+    if isinstance(a, dict) and a.get('schema_version') == 1:
+        value = number(a.get('value'))
+        if value is None or a['metric'] == 'usage_total':
+            return None
+        return {'source': source, 'model': str(cfg.get('model') or source)[:100],
+                'basis': a['basis'], 'stale': not a['can_alert'], 'remaining': value,
+                'unit': a['unit'], 'percent': a['percent'], 'updated_at': a['observed_at']}
     result = {"source": source, "model": str(cfg.get("model") or source)[:100],
               "basis": str(state.get("basis") or "官方账户余额")[:100], "stale": bool(state.get("stale")),
               "remaining": None, "unit": cfg.get("currency", ""), "percent": None,
@@ -81,19 +91,32 @@ def alert_level(state, quota):
     return 0
 
 
+def reminder_due(previous, level, stamp, day):
+    """A new severity bypasses acknowledgement; timed snooze rearms only once."""
+    if level > previous.get("notified_level", previous.get("level", 0)):
+        return True
+    until = previous.get("snooze_until")
+    if until is not None:
+        return stamp >= until
+    acknowledged = previous.get("ack_day")
+    return bool(acknowledged and acknowledged != day)
+
+
 class Companion:
-    def __init__(self, directory, monitor, recording, request_reply, announce, clock=time.time):
+    def __init__(self, directory, monitor, recording, request_reply, announce, clock=time.time, agent_status=None):
         self.path = Path(directory) / "yui-care.json"
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.monitor, self.recording = monitor, recording
         self.request_reply, self.announce, self.clock = request_reply, announce, clock
+        self.agent_status = agent_status
         self.lock = threading.RLock()
         self.stop_event, self.wake = threading.Event(), threading.Event()
         self.worker = None
         self.jobs = {}
         self.last_voice = None
         self.last_result = None
-        self.data = {"enabled": True, "voice": True, "interval": 300, "character_name": "YUI", "alerts": {}}
+        self.data = {"enabled": True, "voice": True, "interval": 300, "character_name": "YUI", "alerts": {},
+                     "task_feedback": True, "task_seen": [], "notices": []}
         try:
             raw = json.loads(self.path.read_text())
             if isinstance(raw, dict):
@@ -113,12 +136,31 @@ class Companion:
 
     def snapshot(self):
         with self.lock:
-            return {key: copy.deepcopy(self.data[key]) for key in ("enabled", "voice", "interval", "character_name")} | {"last_delivery": copy.deepcopy(self.last_result), "background": True}
+            result = {key: copy.deepcopy(self.data[key]) for key in ("enabled", "voice", "interval", "character_name", "task_feedback")}
+            notices = copy.deepcopy(self.data["notices"])
+            result.update(last_delivery=copy.deepcopy(self.last_result), background=True,
+                          reminder_policy="threshold_once", completion_source="N.E.K.O 明确完成的任务")
+        latest = self.monitor.snapshot()
+        visible = []
+        for notice in notices:
+            if notice.get("dismissed") or notice["expires_at"] <= self.clock():
+                continue
+            if notice["kind"] == "low_food":
+                state = next((p["snapshot"] for p in latest.get("profiles", []) if p["id"] == notice["profile"] and p.get("enabled")), None) if latest.get("profiles") else latest
+                if not result["enabled"] or state is None or alert_level(state, quota_snapshot(state)) < notice["level"]:
+                    continue
+            elif not result["task_feedback"]:
+                continue
+            visible.append(notice)
+        result["notices"] = visible
+        return result
 
     def configure(self, values):
+        if set(values) - {"enabled", "voice", "interval", "character_name", "task_feedback"}:
+            raise ValueError("未知的陪伴设置")
         with self.lock:
             data = copy.deepcopy(self.data)
-            for key in ("enabled", "voice"):
+            for key in ("enabled", "voice", "task_feedback"):
                 if key in values:
                     if type(values[key]) is not bool:
                         raise ValueError("提醒开关无效")
@@ -140,6 +182,67 @@ class Companion:
             self.save()
         self.wake.set()
         return self.snapshot()
+
+    def respond(self, action, notice_id):
+        if action not in ("snooze", "today", "dismiss") or not isinstance(notice_id, str):
+            raise ValueError("提醒操作无效")
+        with self.lock:
+            notice = next((n for n in self.data["notices"] if n["id"] == notice_id), None)
+            if not notice or notice.get("dismissed") or notice["expires_at"] <= self.clock():
+                raise ValueError("这条提醒已收起，请查看最新状态")
+            if action != "dismiss" and notice["kind"] != "low_food":
+                raise ValueError("这条消息不需要延后提醒")
+            if notice["kind"] == "low_food":
+                previous = self.data["alerts"].get(notice["profile"], {})
+                if previous.get("notice_id") != notice_id:
+                    raise ValueError("额度已有新变化，请处理最新提醒")
+                previous.pop("snooze_until", None)
+                previous.pop("ack_day", None)
+                if action == "snooze":
+                    previous["snooze_until"] = self.clock() + 1800
+                elif action == "today":
+                    previous["ack_day"] = datetime.fromtimestamp(self.clock()).astimezone().date().isoformat()
+                job = self.jobs.get("alert")
+                if job:
+                    job["alerts"] = [row for row in job.get("alerts", []) if row["profile"] != notice["profile"]]
+                    if not job["alerts"]:
+                        self.jobs.pop("alert", None)
+            notice["dismissed"] = True
+            self.save()
+        return self.snapshot()
+
+    def add_notice(self, kind, line, **facts):
+        notice = {"id": str(uuid.uuid4()), "kind": kind, "line": line, "at": self.clock(),
+                  "expires_at": self.clock() + (86400 if kind == "low_food" else 60), **facts}
+        self.data["notices"].append(notice)
+        del self.data["notices"][:-60]
+        return notice
+
+    def check_tasks(self):
+        if self.agent_status is None:
+            return
+        events = self.agent_status.snapshot().get("completed_events", [])
+        accepted = []
+        with self.lock:
+            for event in events:
+                identifier = event.get("id")
+                stamp = number(event.get("at"))
+                if (event.get("source") != "neko_tasks" or event.get("status") != "completed"
+                        or not isinstance(identifier, str) or not 1 <= len(identifier) <= 100
+                        or stamp is None or not 0 <= self.clock() - stamp <= 120
+                        or identifier in self.data["task_seen"]):
+                    continue
+                self.data["task_seen"].append(identifier)
+                accepted.append(event)
+            if not accepted:
+                return
+            del self.data["task_seen"][:-1000]
+            if self.data["task_feedback"]:
+                count = len(accepted)
+                self.add_notice("task_completed", "忙完一件啦喵～" if count == 1 else f"忙完 {count} 件啦喵～", count=count)
+            self.save()
+        for event in accepted:
+            self.recording.remember("task_completed", "N.E.K.O 明确报告一件任务完成。", event_id=event["id"])
 
     def queue(self, category, line, quota, session_id=None, urgent=False, profile=None, cue=None):
         with self.lock:
@@ -183,26 +286,31 @@ class Companion:
             with self.lock:
                 if not self.data["enabled"]:
                     return
-                previous = self.data["alerts"].get(profile, {})
+                previous = copy.deepcopy(self.data["alerts"].get(profile, {}))
                 if not level:
-                    if previous:
+                    recovered = quota["percent"] is not None and quota["percent"] > 28 or quota["percent"] is None and quota["remaining"] > (number(snapshot.get("config", {}).get("low_balance")) or 0) * 1.1
+                    if previous and recovered:
                         self.data["alerts"].pop(profile, None)
                         self.save()
                     continue
-                interval = max(60, self.data["interval"] // (2 if level >= 2 else 1))
-                last = previous.get("at")
-                if last is not None and now >= last and now - last < (60 if level > previous.get("level", 0) else interval):
+                day = datetime.fromtimestamp(now).astimezone().date().isoformat()
+                if not reminder_due(previous, level, now, day):
                     continue
                 count = previous.get("count", 0) + 1
-                self.data["alerts"][profile] = {"at": now, "level": level, "count": count}
-                self.save()
             fact = quota_text(quota)
-            lines = [f"那个……{fact}。本喵有点担心，记得补充猫粮喵～",
-                     f"本喵又来看猫粮了……{fact}。肚子都快饿扁了，快帮本喵看看喵～",
-                     f"呜……{fact}。本喵越来越不安心了，再不添猫粮就要追大肥鱼了喵～"]
-            line = lines[min(count - 1, 2)] if level < 3 else f"呜哇！{fact}。猫粮已经见底了，快救救饿肚子的本喵喵～"
-            self.recording.remember("low_food", "YUI 因低猫粮尝试第 " + str(count) + " 次提醒；台词：“" + line + "”", quota)
-            due.append({"line": line, "quota": quota, "profile": profile})
+            lines = {1: "猫粮有点少了，记得添一点喵～", 2: "猫粮更少了，本喵有点担心喵～", 3: "猫粮见底啦，快救救饿肚子的本喵喵～"}
+            line = f"{quota['model']} · {lines[level]}"
+            with self.lock:
+                if not self.data["enabled"] or self.data["alerts"].get(profile, {}) != previous:
+                    continue
+                for notice in self.data["notices"]:
+                    if notice.get("profile") == profile:
+                        notice["dismissed"] = True
+                notice = self.add_notice("low_food", line, profile=profile, level=level, quota=quota)
+                self.data["alerts"][profile] = {"at": now, "level": level, "notified_level": max(level, previous.get("notified_level", previous.get("level", 0))), "count": count, "notice_id": notice["id"]}
+                self.save()
+            self.recording.remember("low_food", line, quota, event_id=notice["id"])
+            due.append({"line": line + "\n" + fact, "quota": quota, "profile": profile, "notice_id": notice["id"]})
         if due:
             with self.lock:
                 # One voice turn covers every due account, instead of overwriting the first.
@@ -233,7 +341,8 @@ class Companion:
                 valid = []
                 for row in job.get("alerts", [job]):
                     profile = next((p["snapshot"] for p in latest.get("profiles", []) if p.get("id") == row.get("profile") and p.get("enabled")), None) if latest.get("profiles") else latest
-                    if profile is not None and alert_level(profile, quota_snapshot(profile)):
+                    current = self.data["alerts"].get(row.get("profile"), {})
+                    if profile is not None and alert_level(profile, quota_snapshot(profile)) and current.get("notice_id") == row.get("notice_id"):
                         valid.append(row)
                 if not self.data["enabled"] or not valid:
                     return
@@ -259,6 +368,7 @@ class Companion:
             self.recording.remember("yui_dialogue", "请求原版 YUI 喊话：“" + row["line"] + "”；" + ("原程序已接受请求，尚未确认实际播放" if submitted else "原程序未接受，不能认定已经出声"), row["quota"])
 
     def tick(self):
+        self.check_tasks()
         self.check_alerts()
         self.deliver()
 

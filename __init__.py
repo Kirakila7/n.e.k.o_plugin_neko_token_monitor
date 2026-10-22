@@ -114,9 +114,10 @@ class NekoTokenMonitorPlugin(NekoPluginBase):
             self.recording = Recording(self.data_path("recording"))
             self.recording.start()
             self.rhythm = Rhythm(self.data_path("rhythm"))
-            self.companion = Companion(self.data_path("yui-care"), monitor, self.recording, self.request_reply, self.announce)
+            agents = AgentStatus()
+            self.companion = Companion(self.data_path("yui-care"), monitor, self.recording, self.request_reply, self.announce, agent_status=agents)
             server, thread = start_server(
-                monitor, request_reply=self.request_reply, agent_status=AgentStatus(), recording=self.recording,
+                monitor, request_reply=self.request_reply, agent_status=agents, recording=self.recording,
                 takeover=self.takeover, rhythm=self.rhythm, companion=self.companion,
             )
             self.logger.info("Budget widget: loopback server ready")

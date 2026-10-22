@@ -29,6 +29,8 @@ def main():
     for source, target in [('neko-white-cat-walk.gif', 'cat-walk.gif'),
                            ('neko-white-cat-react.gif', 'cat-react.gif')]:
         shutil.copy2(root / 'static/chase' / source, resources / target)
+    for name in ['yui-camera-off.png', 'yui-camera-on.png']:
+        shutil.copy2(root / 'static/launcher' / name, resources / name)
     subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
     for source, target in [('quota-reader.m', 'catfood-quota-reader'), ('app-topup.m', 'catfood-open-topup')]:

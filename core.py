@@ -74,7 +74,10 @@ class Monitor:
         self.last_attempt = 0
         self.last_alert = 0
         self.trae_watcher = None
+        self.allowance_ledger = None
+        self.allowance_profile = None
         self.config = {
+            "recorded_at": None,
             "source": "deepseek",
             "model": "",
             "quota_remaining": None,
@@ -235,6 +238,10 @@ class Monitor:
                     "aliyun_profile",
                 )
             )
+            manual = source in ("manual", "manual_quota") or source == "desktop_quota" and cfg["quota_mode"] == "manual"
+            entry_fields = ('budget', 'budget_start') if source == 'manual' else ('quota_remaining', 'quota_total', 'quota_unit', 'quota_reset')
+            if manual and (changed_key or any(field in values for field in entry_fields)):
+                cfg["recorded_at"] = time.time()
             self.write("config.json", cfg)
             self.config = cfg
             if changed_key:
@@ -254,6 +261,8 @@ class Monitor:
             cfg = {k: v for k, v in self.config.items() if k != "api_key"}
             row = next((r for r in self.state.get("balances", []) if r["currency"] == cfg["currency"]), None)
             updated = self.state.get("updated_at")
+            if cfg['source'] in ('manual', 'manual_quota') or cfg['source'] == 'desktop_quota' and cfg['quota_mode'] == 'manual':
+                updated = cfg.get('recorded_at')
             error = self.state.get("error")
             current = bool(updated and not error and time.time() - updated <= cfg["interval"] * 2)
             estimate = None
@@ -262,7 +271,8 @@ class Monitor:
                     max(Decimal(row["balance"]), Decimal(0)) * 1000000 / Decimal(str(cfg["price_per_million"]))
                 )
             usage = {k: v for k, v in self.read("usage-jev.json", {}).items() if k != "seen"}
-            return {
+            result = {
+                "checked_at": self.state.get("checked_at"),
                 "codex_quota": self.state.get("codex_quota"),
                 "account_quota": self.state.get("account_quota"),
                 "reported_usage": usage,
@@ -283,6 +293,9 @@ class Monitor:
                 if self.state.get("day") == dt.date.today().isoformat()
                 else None,
             }
+            if self.allowance_ledger is not None:
+                result["allowance"] = self.allowance_ledger.observe(result, self.allowance_profile, self.config)
+            return result
 
     def refresh(self, *, app_open=False):
         # Serialize refreshes and key changes; never send a stale key's results to a new account.
@@ -291,11 +304,13 @@ class Monitor:
                 if self.last_attempt and time.monotonic() - self.last_attempt < 60:
                     return self.snapshot()
                 self.last_attempt = time.monotonic()
+                self.state["checked_at"] = time.time()
                 try:
                     quota = read_quota()
                     self.state = {
+                        "checked_at": time.time(),
                         "codex_quota": quota,
-                        "updated_at": time.time(),
+                        "updated_at": quota.get('observed_at', time.time()),
                         "error": None,
                         "basis": "Codex 套餐额度",
                     }
@@ -314,18 +329,19 @@ class Monitor:
                 self.last_attempt = time.monotonic()
                 try:
                     quota = read_desktop_quota(self.config["desktop_app"])
-                    self.state = {"account_quota": quota, "updated_at": time.time(), "error": None, "basis": quota["basis"]}
+                    self.state = {"account_quota": quota, "checked_at": time.time(), "updated_at": quota.get("observed_at", time.time()), "error": None, "basis": quota["basis"]}
                 except NavigationBusy:
                     self.last_attempt = previous_attempt
                     return self.snapshot()
                 except Exception as exc:
+                    self.state["checked_at"] = time.time()
                     self.state["error"] = str(exc) if isinstance(exc, ValueError) else "本机额度读取失败"
                 self.write("state.json", self.state)
                 return self.snapshot()
             if self.config["source"] == "manual_quota" or self.config["source"] == "desktop_quota" and self.config["quota_mode"] == "manual":
                 # Manual values retain their entry time; polling must not make them look fresh.
-                if not self.state.get("updated_at") and self.config["quota_remaining"] is not None:
-                    self.state = {"updated_at": time.time(), "basis": "手动记录 · 不自动扣减或重置"}
+                if not self.state.get("updated_at") and self.config.get("recorded_at") and self.config["quota_remaining"] is not None:
+                    self.state = {"updated_at": self.config["recorded_at"], "basis": "手动记录 · 不自动扣减或重置"}
                     self.write("state.json", self.state)
                 return self.snapshot()
             if self.config["source"] == "jev":
@@ -335,6 +351,7 @@ class Monitor:
             if self.last_attempt and time.monotonic() - self.last_attempt < 60:
                 return self.snapshot()
             self.last_attempt = time.monotonic()
+            self.state["checked_at"] = time.time()
             try:
                 payload = (
                     read_harness_balance() if self.config["source"] == "app_bridge" else
@@ -349,9 +366,10 @@ class Monitor:
                     baseline.setdefault(currency, row["balance"])
                     daily[currency] = str(Decimal(baseline[currency]) - Decimal(row["balance"]))
                 self.state = {
+                    "checked_at": time.time(),
                     "balances": rows,
                     "is_available": payload["is_available"],
-                    "updated_at": payload.get("observed_at", time.time()),
+                    "updated_at": self.config.get("recorded_at") if self.config["source"] == "manual" else payload.get("observed_at", time.time()),
                     "wallet_breakdown": payload.get("wallet_breakdown"),
                     "error": None,
                     "day": day,

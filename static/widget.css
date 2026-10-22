@@ -86,18 +86,6 @@ body.browser-preview{--companion-margin:16px}
 @keyframes appear{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
-/* Rhythm controls sit to the left of YUI; optional settings use a separate panel. */
-body.music-active #connection,body.music-active #agentStatus{visibility:hidden}
-#musicPanel{position:absolute;left:12px;top:208px;width:166px;z-index:35;border:1px solid #d8d5e5;border-radius:12px;background:#fffdf8;padding:8px;font-size:12px}
-#musicPanel[hidden],#musicSettingsPanel[hidden]{display:none}
-#musicPanel header,#musicSettingsPanel header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-#musicPanel button,#musicSettingsPanel button{border:0;border-radius:6px;background:#eeeaf7;padding:6px;font-size:11px}
-#musicPanel header button,#musicSettingsPanel header button{padding:0 7px;font-size:19px}
-.musicControls{display:flex;gap:5px}
-#musicStatus{margin:7px 0 0;font-size:11px;line-height:1.5}
-#musicSettingsPanel{position:absolute;inset:24px 20px auto;z-index:75;border:2px solid var(--ink);border-radius:14px;background:#fffdf8;padding:16px;font-size:13px;box-shadow:0 5px 20px #353b7322}
-#musicSettingsPanel>label{display:block;margin-top:12px}#musicSettingsPanel>input{width:100%;margin:8px 0}#musicSettingsPanel output{float:right;color:#85899f}#musicSettingsPanel p{font-size:11px;line-height:1.6;color:#85899f}
-
 /* Rhythm owns the inner pose; click/drag keep the existing outer button. */
 #rhythmPose{position:relative;display:block;width:100%;height:100%;transform-origin:50% 94%;pointer-events:none;will-change:transform}
 #rhythmPanel{position:absolute;inset:6px;z-index:105;overflow:auto;background:#f9fcff;border:2px solid #879dc4;border-radius:18px;padding:16px;font-size:14px;box-shadow:0 5px 24px #353b7322}
@@ -116,3 +104,7 @@ body[data-quota-reaction="recovered"] #faceMood{opacity:0}
 .playSettings input{width:100%;font:inherit;padding:9px;border:1px solid #d8d5e5;border-radius:8px}
 .playSettings button{padding:8px 12px;border:0;border-radius:8px;background:#eeeaf7;color:var(--ink)}
 .contextMenu{z-index:650}
+
+body.bubble-hidden #thought,body.bubble-hidden .dot{display:none!important}
+
+.contextMenu button[hidden]{display:none!important}

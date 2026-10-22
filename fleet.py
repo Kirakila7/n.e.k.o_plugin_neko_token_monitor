@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+from .allowance import AllowanceLedger
 from .core import Monitor
 from .foreground import ForegroundWatcher
 from .integrations import info as integration_info
@@ -43,6 +44,7 @@ PROFILES = {row[0]: row for row in CATALOG}
 class Fleet:
     def __init__(self, directory, announce=None):
         self.directory = Path(directory)
+        self.allowances = AllowanceLedger(self.directory)
         self.storage = Monitor(directory)
         self.lock = threading.RLock()
         self.monitors = {}
@@ -71,6 +73,7 @@ class Fleet:
         self.display_mode = meta.get("display_mode", "auto")
         if self.display_mode not in ("auto", "fixed"):
             self.display_mode = "auto"
+        self.bubble_visible = meta.get("bubble_visible") is not False
         self.selected = self.fixed_profile
         self.foreground_profile = None
         self.foreground_wallet_visible = False
@@ -89,13 +92,16 @@ class Fleet:
                 monitor.config["model"] = PROFILES[key][1]
                 if key in ("trae", "workbuddy"):
                     monitor.config.update(desktop_app=key, quota_unit="积分")
+            monitor.allowance_ledger = self.allowances
+            monitor.allowance_profile = key
             self.monitors[key] = monitor
             self.snapshots[key] = monitor.snapshot()
         return self.monitors[key]
 
     def _persist(self):
         self.storage.write("profiles.json", {"selected": self.fixed_profile, "fixed_profile": self.fixed_profile,
-                                             "display_mode": self.display_mode, "enabled": sorted(self.enabled)})
+                                             "display_mode": self.display_mode, "bubble_visible": self.bubble_visible,
+                                             "enabled": sorted(self.enabled)})
 
     def _snapshot(self, key):
         monitor = self._monitor(key)
@@ -112,7 +118,15 @@ class Fleet:
         # Browser-login wallets are a fallback, not a replacement for an API
         # key that may belong to a different account.
         wallet = self.page_wallets.get(key)
-        if wallet and not monitor.config.get("api_key"):
+        if key == "jev":
+            state["reported_usage"] = self.storage.snapshot()["reported_usage"]
+            state["allowance"] = self.allowances.observe(state, key, state["config"])
+        primary = state["allowance"]
+        page_state = None
+        prefer_primary = primary["account_scope"]["kind"] == "credential_slot"
+        if wallet:
+            page_state = copy.deepcopy(state)
+        if wallet and not prefer_primary:
             current = (self.foreground_wallet_visible and self.foreground_profile == key and self.foreground_status == "page"
                        and time.time() - wallet["observed_at"] <= 15)
             if state["config"]["currency"] != wallet["currency"]:
@@ -123,7 +137,23 @@ class Fleet:
                          estimated_tokens=None, page_observation=True,
                          basis="DeepSeek 网页余额 · 充值与赠送合计 · 页面显示精度",
                          wallet_breakdown={"CNY": {"normal": wallet["normal"], "bonus": wallet["bonus"]}})
+        if wallet:
+            page_state.update(config=copy.deepcopy(state["config"]), selected={"currency": wallet["currency"], "balance": wallet["balance"]},
+                              updated_at=wallet["observed_at"], checked_at=wallet["observed_at"],
+                              stale=not (self.foreground_wallet_visible and self.foreground_profile == key and self.foreground_status == "page"
+                                         and 0 <= time.time() - wallet["observed_at"] <= 15), error=None)
+        if page_state and page_state["config"]["currency"] != wallet["currency"]:
+            page_state["config"].update(currency=wallet["currency"], balance_total=None)
+        state["allowance"] = self.allowances.select(primary, page_state, prefer_primary=prefer_primary)
         return state
+
+    def allowance_history(self, profile=None):
+        with self.lock:
+            key = profile or self.selected
+            if key not in PROFILES:
+                raise ValueError("未知模型来源")
+            reading = self._snapshot(key)["allowance"]
+            return self.allowances.history(reading)
 
     def tracking(self):
         with self.lock:
@@ -139,7 +169,8 @@ class Fleet:
             }.get(status, "前台不是已识别平台，暂保留 " + name)
             return {"mode": self.display_mode, "fixed_profile": self.fixed_profile,
                     "profile": self.selected, "foreground_profile": self.foreground_profile,
-                    "status": status, "hint": hint, "supported": sys.platform == "darwin"}
+                    "status": status, "hint": hint, "supported": sys.platform == "darwin",
+                    "bubble_visible": self.bubble_visible}
 
     def _activate(self, key):
         monitor = self._monitor(key)
@@ -172,19 +203,25 @@ class Fleet:
                 self._activate(self.selected)
 
     def configure_tracking(self, values):
-        if set(values) - {"mode", "profile"} or values.get("mode") not in ("auto", "fixed"):
+        if (not values or set(values) - {"mode", "profile", "bubble_visible"}
+                or ("mode" in values and values["mode"] not in ("auto", "fixed"))
+                or ("mode" not in values and set(values) != {"bubble_visible"})
+                or ("bubble_visible" in values and type(values["bubble_visible"]) is not bool)):
             raise ValueError("请选择自动跟随或固定监测")
         with self.lock:
             key = values.get("profile", self.fixed_profile)
             if key not in PROFILES:
                 raise ValueError("未知模型来源")
-            self.display_mode = values["mode"]
-            if self.display_mode == "fixed":
-                self.fixed_profile = key
-                self.selected = key
-            elif self.foreground_profile:
-                self.selected = self.foreground_profile
-            self._activate(self.selected)
+            if "mode" in values:
+                self.display_mode = values["mode"]
+                if self.display_mode == "fixed":
+                    self.fixed_profile = key
+                    self.selected = key
+                elif self.foreground_profile:
+                    self.selected = self.foreground_profile
+                self._activate(self.selected)
+            if "bubble_visible" in values:
+                self.bubble_visible = values["bubble_visible"]
             self._persist()
         return self.snapshot()
 

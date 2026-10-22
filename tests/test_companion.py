@@ -27,7 +27,7 @@ def setup(tmp_path):
     return care, record, monitor, clock, spoken, announced
 
 
-def test_reminders_run_without_widget_and_repeat_persistently(tmp_path):
+def test_reminders_run_without_widget_once_per_threshold_and_persist(tmp_path):
     care, record, monitor, clock, spoken, _ = setup(tmp_path)
     assert not record.snapshot()["active"]
     care.tick()
@@ -36,10 +36,13 @@ def test_reminders_run_without_widget_and_repeat_persistently(tmp_path):
     clock[0] += 149
     care.tick()
     assert len(spoken) == 1
-    clock[0] += 1
+    clock[0] += 10000
     care.tick()
-    assert len(spoken) == 2 and spoken[0][0] != spoken[1][0]
+    assert len(spoken) == 1
     restarted = companion.Companion(tmp_path / "care", monitor, record, care.request_reply, care.announce, clock=lambda: clock[0])
+    restarted.tick()
+    assert len(spoken) == 1
+    monitor.state["config"]["quota_remaining"] = 0
     restarted.tick()
     assert len(spoken) == 2
     assert record.snapshot()["pending_memory"] >= 2

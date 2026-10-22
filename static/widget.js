@@ -1,7 +1,14 @@
-const el=id=>document.getElementById(id);let state=null,csrf='',talk=false,timer=null,quipIndex=0,mode=localStorage.getItem('neko-budget-mode')||'balance';
+const el=id=>document.getElementById(id);let state=null,csrf='',talk=false,timer=null,quipIndex=0,bubbleToggleBusy=false;
 const browserPreview=!window.webkit?.messageHandlers?.nekoWidget&&!window.chrome?.webview;
 if(browserPreview)document.body.classList.add('browser-preview');
 let companionPosition=null;
+let launcherLayoutKey='';
+function reportLauncherLayout(){
+ const bridge=window.webkit?.messageHandlers?.nekoWidget;if(!bridge)return;
+ const rect=el('thought').getBoundingClientRect();if(!rect.width||!rect.height)return;
+ const bounds={x:rect.x,y:rect.y,width:rect.width,height:rect.height},key=JSON.stringify(bounds);
+ if(key===launcherLayoutKey)return;launcherLayoutKey=key;bridge.postMessage({action:'launcherLayout',rect:bounds});
+}
 if(browserPreview){try{const saved=JSON.parse(localStorage.getItem('catfood-companion-position'));if(saved&&Number.isFinite(saved.x)&&Number.isFinite(saved.y))companionPosition={x:Math.max(0,Math.min(1,saved.x)),y:Math.max(0,Math.min(1,saved.y))};}catch{}}
 function placeCompanion(x,y){
  const group=el('companion'),scale=Number(document.documentElement.style.getPropertyValue('--companion-scale'))||1;
@@ -11,11 +18,11 @@ function placeCompanion(x,y){
  group.style.left=cx+'px';group.style.top=cy+'px';
  return {x:cx/window.innerWidth,y:cy/window.innerHeight};
 }
-function fitCompanion(){const height=Math.max(450,382+el('recordBar').offsetHeight+8);el('companion').style.height=height+'px';const available=Math.max(1,window.innerHeight-(browserPreview?16:0));document.documentElement.style.setProperty('--companion-scale',String(Math.min(1,available/height)));if(browserPreview)placeCompanion((companionPosition?.x??.5)*window.innerWidth,(companionPosition?.y??.5)*window.innerHeight);}
+function fitCompanion(){const height=Math.max(450,382+el('recordBar').offsetHeight+8);el('companion').style.height=height+'px';const available=Math.max(1,window.innerHeight-(browserPreview?16:0));document.documentElement.style.setProperty('--companion-scale',String(Math.min(1,available/height)));if(browserPreview)placeCompanion((companionPosition?.x??.5)*window.innerWidth,(companionPosition?.y??.5)*window.innerHeight);reportLauncherLayout();}
 fitCompanion();window.addEventListener('resize',fitCompanion);
 if(window.ResizeObserver)new ResizeObserver(fitCompanion).observe(el('recordBar'));
-let recordBarVisible=true;
-try{recordBarVisible=localStorage.getItem('catfood-record-bar-visible')!=='false';}catch{}
+let recordBarVisible=false;
+try{recordBarVisible=localStorage.getItem('catfood-record-bar-visible')==='true';}catch{}
 function setRecordBarVisible(visible,persist=true){
  recordBarVisible=visible;el('recordBar').hidden=!visible;
  const toggle=el('recordVisibilityToggle');toggle.setAttribute('aria-checked',String(visible));
@@ -53,56 +60,47 @@ el('closeOutfits').onclick=()=>el('outfitPanel').hidden=true;
 el('outfitFollow').onchange=()=>{outfitMode=el('outfitFollow').value;saveOutfitPreference();updateCostume();};
 const quotaMood=window.CatfoodQuotaMood;
 const percentText=value=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1}).format(value)+'%';
-const tokenText=value=>new Intl.NumberFormat('zh-CN',{notation:value>=10000?'compact':'standard',maximumFractionDigits:1}).format(value);
 function renderQuotaMood(){
  const q=quotaMood.quota(state),tier=quotaMood.tier(q?.percent),character=el('character');
+ window.catfoodRefreshBags?.(state);
  character.dataset.mood=tier;
  if(q)character.dataset.remainingPercent=String(q.percent);else delete character.dataset.remainingPercent;
- const description=q?(q.stale?'上次数据 · ':'')+'猫粮剩余 '+percentText(q.percent)+' · '+quotaMood.labels[tier]:quotaMood.labels.unknown;
+ const description=q?(q.stale?'上次数据 · ':'')+'猫粮剩余 '+percentText(q.percent)+' · '+quotaMood.labels[tier]:state?.allowance?.value===null?state.allowance.status_label:quotaMood.labels.unknown;
  character.title=description+' · 右键打开人物设置';character.setAttribute('aria-label','摸摸猫娘，按住拖动，右键打开人物设置。'+description);
  window.catfoodQuotaState=q;window.dispatchEvent(new CustomEvent('catfood:quota',{detail:q}));
  return q;
 }
 function render(){
  if(!state)return;
- const c=state.config,model=state.profiles?.find(p=>p.id===state.profile)?.name||c.model||'猫粮';
- el('heading').textContent='猫粮余额';el('amount').classList.remove('idle-label','token-amount');el('amount').title='';
- if(c.source==='desktop_quota'&&c.quota_mode!=='manual'){
-  const remaining=state.account_quota?.remaining;
-  el('amount').textContent=remaining!=null?remaining.toLocaleString('zh-CN',{maximumFractionDigits:2})+' 积分':'待读取';
-  el('detail').textContent=model+' 额度剩余';
-  el('connection').textContent=state.error||'以应用最新账单为准；总积分为自设参考';return;
- }
- if(c.source==='manual_quota'||c.source==='desktop_quota'){
-  const remaining=c.quota_remaining,hasValue=remaining!==null&&remaining!==undefined;
-  el('amount').classList.toggle('token-amount',c.quota_unit==='token'&&hasValue);
-  el('amount').textContent=hasValue?(c.quota_unit==='token'?tokenText(remaining):remaining.toLocaleString())+' '+c.quota_unit:'未填写';
-  el('amount').title=hasValue?remaining.toLocaleString()+' '+c.quota_unit:'';
-  el('detail').textContent=model+' 额度剩余';
-  el('connection').textContent=(c.quota_total!=null?'总额度 '+c.quota_total+' '+c.quota_unit+'\n':'')+(c.quota_reset?'重置备注 '+c.quota_reset:'不会自动扣减或重置');return;
- }
- if(c.source==='codex'){
-  const windows=state.codex_quota?.windows||[];
-  const w=windows.filter(x=>Number.isFinite(x.remaining)&&x.remaining>=0&&x.remaining<=100).sort((a,b)=>a.remaining-b.remaining)[0];
-  el('amount').textContent=w?percentText(w.remaining):'待查询';
-  el('detail').textContent=w?'Codex '+w.label+'剩余':'Codex 额度剩余';
-  el('connection').textContent=state.error||(w?'重置 '+new Date(w.resets_at*1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})+'\n'+windows.filter(x=>x!==w).map(x=>x.label+'剩余 '+x.remaining+'%').join('；'):'正在查询喵～');return;
- }
- if(c.source==='jev'){
-  const u=state.reported_usage||{};
-  el('amount').textContent='未提供';el('detail').textContent='JEV 额度剩余';
-  el('connection').textContent='输入 '+(u.input_tokens||0)+' · 输出 '+(u.output_tokens||0)+'\n仅本机上报用量';return;
- }
- const row=state.selected,sym=row?.currency==='USD'?'$':'¥',estimated=state.estimated_tokens;
- el('amount').classList.toggle('token-amount',mode==='token'&&estimated!=null);
- el('amount').textContent=mode==='token'?(estimated==null?'待估算':'≈ '+tokenText(estimated)+' token'):(row?sym+' '+Number(row.balance).toFixed(2):state.configured?'待查询':'未连接');
- el('amount').title=mode==='token'&&estimated!=null?'估算 '+estimated.toLocaleString()+' token':'';
- el('detail').textContent=model+(mode==='token'?' 预计 Token 剩余':['openai','anthropic','manual'].includes(c.source)?' 额度剩余':' 账户余额');
- el('connection').textContent=state.error?'查询失败\n保留上次结果':state.stale&&row?'上次数据\n等待更新':'';
+ const view=window.CatfoodQuotaDisplay.present(state);
+ el('heading').textContent='猫粮余额';el('amount').classList.remove('idle-label');
+ el('amount').classList.toggle('token-amount',view.token);el('amount').textContent=view.amount;el('amount').title=view.title;
+ const signature=(state.profile||'')+'|'+view.amount+'|'+view.detail;
+ if(el('readout').dataset.signature!==signature){el('readout').dataset.signature=signature;el('readout').classList.remove('quota-updated');void el('readout').offsetWidth;el('readout').classList.add('quota-updated');}
+ el('detail').textContent=view.detail;el('connection').textContent=view.connection;
+ window.catfoodRefreshPeek?.(state);
 }
+function syncBubble(){
+ const visible=state?.tracking?.bubble_visible!==false,wasHidden=el('thought').hidden;
+ el('thought').hidden=!visible;document.body.classList.toggle('bubble-hidden',!visible);
+ if(visible&&wasHidden)reportLauncherLayout();
+ const toggle=el('bubbleVisibilityToggle');toggle.setAttribute('aria-checked',String(visible));toggle.disabled=bubbleToggleBusy||!state;
+ if(!visible&&contextMenuOwner===el('thought'))closeContextMenus();
+}
+el('bubbleVisibilityToggle').onclick=async()=>{
+ if(bubbleToggleBusy||!state||!csrf)return;
+ const toggle=el('bubbleVisibilityToggle'),visible=state.tracking?.bubble_visible!==false;
+ bubbleToggleBusy=true;syncBubble();
+ try{
+  const response=await fetch('/api/tracking',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({bubble_visible:!visible})});
+  const data=await response.json();if(!response.ok)throw Error(data.error||'气泡开关保存失败');
+  state=data;csrf=data.csrf||csrf;toggle.textContent='显示猫粮气泡';toggle.title='';renderAgentCard();
+ }catch(error){toggle.textContent='气泡保存失败，点此重试';toggle.title=error.message;}
+ finally{bubbleToggleBusy=false;syncBubble();}
+};
 function renderAgentCard(){
- updateCostume();renderQuotaMood();if(talk||!state)return;
- if(idleCard&&mode==='balance'){
+ syncBubble();updateCostume();renderQuotaMood();if(talk||!state)return;
+ if(idleCard){
   const names=(agentData?.active_agents||[]).map(a=>a.name);
   el('heading').textContent='当前 Agent：';el('amount').textContent=agentState==='busy'?(names.length===1?names[0]:names.length+' 个在工作'):agentState==='idle'?'空闲时段':'状态未连接';
   el('detail').textContent=agentState==='busy'?(names.join('、')+' · 正在工作'):agentState==='idle'?'Agent 没在忙，本喵陪你喵～':'暂时读不到 Agent 状态';
@@ -110,9 +108,7 @@ function renderAgentCard(){
  }else{render();}
  if(state.tracking){
   el('thought').title=state.tracking.hint+' · 右键打开猫粮额度设置';
-  el('followForeground').setAttribute('aria-checked',String(state.tracking.mode==='auto'));
-  el('pinCurrentProfile').setAttribute('aria-checked',String(state.tracking.mode==='fixed'));
-  el('pinCurrentProfile').textContent='固定当前猫粮 · '+(state.config.model||state.profile);
+
  }
 }
 function say(text){talk=true;el('readout').hidden=true;el('quip').hidden=false;el('quip').textContent=text;el('quip').classList.remove('fade');void el('quip').offsetWidth;el('quip').classList.add('fade');clearTimeout(timer);timer=setTimeout(restore,4200);}
@@ -142,9 +138,9 @@ function bounce(id){
  clickAnimations.set(target,target.animate(frames,{duration:character?500:380,easing:'ease-out'}));
 }
 
-el('thought').onclick=e=>{if(e.button!==0||e.ctrlKey)return;recordAction('ask');bounce('thought');idleCard=!idleCard;mode='balance';localStorage.setItem('neko-budget-mode',mode);restore();};
+el('thought').onclick=e=>{if(e.button!==0||e.ctrlKey)return;recordAction('ask');bounce('thought');idleCard=!idleCard;restore();};
 const petLines=['突、突然摸头干嘛……\n只许再摸一下喵～','哼，头发都被你揉乱了。\n……也没说不让你摸喵～','好啦，本喵在这里。\n今天也辛苦你了喵～','碳基生物，轻一点。\n本喵又不会跑喵～'];let petIndex=0;
-function pet(){recordAction("pet");bounce('character');bounce('thought');if(window.catfoodMusic?.pet())return;const lines=[...quips,...petLines];const line=lines[petIndex++%lines.length];say(line);if(!browserPreview)requestSpokenLine(line);}
+function pet(){recordAction("pet");bounce('character');bounce('thought');const lines=[...quips,...petLines];const line=lines[petIndex++%lines.length];say(line);if(!browserPreview)requestSpokenLine(line);}
 el('character').onclick=e=>{if(e.button===0&&!e.ctrlKey)pet();};
 let companionDrag=null,suppressDragClick=false;
 el('companion').addEventListener('pointerdown',e=>{
@@ -206,20 +202,11 @@ for(const id of ['menu','quotaMenu']){
   }else if(e.key==='Tab')closeContextMenus();
  });
 }
-for(const [id,value] of [['balanceMode','balance'],['tokenMode','token']])el(id).onclick=()=>{mode=value;idleCard=false;localStorage.setItem('neko-budget-mode',mode);closeContextMenus();restore();};
-el('settings').onclick=()=>{closeContextMenus();openAccount();};
+for(const id of ['settings','characterSettings'])el(id).onclick=()=>{closeContextMenus();openAccount();};
 el('topupOpen').onclick=()=>{closeContextMenus();if(state?.profile)window.CatfoodTopUp.open(state.profile);};
-async function changeTracking(trackingMode){
- if(!csrf||!state)return;closeContextMenus();
- try{const r=await fetch('/api/tracking',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:JSON.stringify({mode:trackingMode,profile:state.profile})});if(!r.ok)throw Error();state=await r.json();idleCard=false;mode='balance';restore();}
- catch{say('监测方式未能保存，请重试喵～');}
-}
-el('followForeground').onclick=()=>changeTracking('auto');el('pinCurrentProfile').onclick=()=>changeTracking('fixed');
 let updateBusy=false,refreshPending=false;
 async function update(refresh=false){if(updateBusy){refreshPending=refreshPending||refresh;return;}updateBusy=true;try{const r=await fetch(refresh?'/api/refresh':'/api/status',refresh?{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'}:{});if(!r.ok)throw Error();state=await r.json();window.catfoodQuotaOnline=true;window.catfoodQuotaReadAt=Date.now();csrf=state.csrf||csrf;renderAgentCard();}catch{window.catfoodQuotaOnline=false;el('connection').textContent='插件连接中断';if(state){state.stale=true;state.estimated_tokens=null;renderQuotaMood();render();el('connection').textContent='插件连接中断';}}finally{updateBusy=false;if(refreshPending){refreshPending=false;update(true);}}}
 el('refreshNow').onclick=()=>{closeContextMenus();update(true);};update();setInterval(()=>update(),1500);
-
-el('yuiReply').onclick=async()=>{el('menu').hidden=true;if(browserPreview)return;try{const r=await fetch('/api/reply',{method:'POST',headers:{'Content-Type':'application/json','X-Neko-CSRF':csrf},body:'{}'});const result=await r.json();if(!r.ok||!result.submitted)throw Error(result.error||'原软件暂时没有接收');say('已经叫她啦喵～\n请看 NEKO 的回应。');el('connection').textContent='是否出声由原软件语音设置决定';}catch(e){say(e.message);}};
 
 let agentPollTimer=null,agentPollBusy=false,agentFingerprint='';
 function scheduleAgentPoll(){clearTimeout(agentPollTimer);agentPollTimer=setTimeout(pollAgent,document.hidden?5000:500);}
@@ -259,12 +246,13 @@ function renderRecording(d){
  recordingState=d;recordingActive=!!d.active;
  window.dispatchEvent(new CustomEvent('catfood:recordsnapshot',{detail:d}));
  if(newlyActive){clearTimeout(nativeHideTimer);nativeHideTimer=null;takeoverConfirmed=false;lastStatusNotes.clear();document.body.classList.remove('record-finished');el('recordCounts').title='正在确认人物替换';restore();noteStatus('agent',el('agentStatus').textContent);noteStatus('connection',el('connection').textContent);}
- el('exitRecord').textContent=browserPreview?'请在桌面挂件中操作':recordingActive?'和猫娘一起玩':'开始记录模式';
+ el('exitRecord').hidden=browserPreview||window.catfoodHasLauncher===true;
+ el('exitRecord').textContent=recordingActive?'退出猫粮监控':'开启猫粮监控';
  el('exitRecord').disabled=browserPreview;
  el('recordCounts').textContent=d.error||`本次摸头 ${d.pet||0} · 询问 ${d.ask||0} ｜累计摸头 ${d.totals?.pet||0} · 询问 ${d.totals?.ask||0}`;
  el('historyTotals').textContent=`共 ${d.totals?.sessions||0} 段记录，摸头 ${d.totals?.pet||0} 次，询问 ${d.totals?.ask||0} 次喵～`;
  el('memoryStatus').textContent=d.pending_memory?`${d.pending_memory} 段已保存在本机，等待写入 YUI 记忆；后台会重试喵～`:'已完成记录的记忆写入均已确认喵～';
- el('historyRows').replaceChildren();for(const row of d.history||[]){const article=document.createElement('article');const notes=(row.status_events||[]).map(item=>`${item.at} · ${item.kind==='agent'?'Agent 状态':'数据状态'}：${item.message}`).join('\n');article.textContent=`${row.start}\n${row.active?'记录中':row.end||'已结束'}\n摸头 ${row.pet||0} 次 · 询问 ${row.ask||0} 次\n${row.active?'互动正在保存':row.memory_saved?'已写入 YUI 记忆':'本机已保存 · 记忆待同步'}${notes?'\n'+notes:''}`;el('historyRows').append(article);}
+ window.catfoodRefreshDiary?.();
 }
 function pendingClicks(){try{return JSON.parse(localStorage.getItem('catfood-pending-clicks')||'[]');}catch{return [];}}
 function savePending(items){localStorage.setItem('catfood-pending-clicks',JSON.stringify(items));}
@@ -281,7 +269,7 @@ function recordAction(action,details={}){
  if(browserPreview&&action!=='status')return Promise.resolve(null);
  if(['pet','ask','note','game'].includes(action)){
   if(!recordingActive||exiting)return Promise.resolve(null);
-  const item={action,event_id:crypto.randomUUID(),session_id:recordingState.id,...details};savePending([...pendingClicks(),item]);
+  const item={action,event_id:crypto.randomUUID(),session_id:recordingState.id,...(['pet','ask'].includes(action)?{at:new Date().toISOString()}:{}),...details};savePending([...pendingClicks(),item]);
  }
  if(action==='end'){
   const id=details.session_id||recordingState?.id;
@@ -328,7 +316,7 @@ window.catfoodNativeState=d=>{
  if(!d.active||!recordingActive||exiting)return;
  const session=recordingState.id,report=reportTakeover(d);
  if(d.ok){if(!takeoverConfirmed)restore();takeoverConfirmed=true;document.body.classList.remove('record-inactive');el('recordCounts').title=d.paused?'原模型已暂停，原程序窗口已隐藏':'原程序窗口已隐藏';}
- else{takeoverConfirmed=false;document.body.classList.add('record-inactive');el('recordCounts').title='人物未替换，原版已保留';native('recordEnd');report.then(()=>recordAction('end',{session_id:session})).catch(()=>{});say(d.reason==='accessibility'?'请先在系统设置授予猫粮辅助功能权限，\n再重新打开挂件喵～':'监控模式未启动，人物未替换。\n已保留原版，请重试喵～');clearTimeout(timer);el('connection').textContent=d.reason==='accessibility'?'辅助功能权限不可用':d.reason==='hide_unconfirmed'?'原版窗口隐藏未确认':'原版人物暂停未确认';}
+ else{takeoverConfirmed=false;document.body.classList.add('record-inactive');el('recordCounts').title='人物未替换，原版已保留';native('recordEnd');report.then(()=>recordAction('end',{session_id:session})).catch(()=>{});say(d.reason==='controls_unavailable'?'原版工具栏暂不可用，已取消接管。\n保留原版 YUI 陪你喵～':d.reason==='accessibility'?'请先在系统设置授予猫粮辅助功能权限，\n再重新打开挂件喵～':'监控模式未启动，人物未替换。\n已保留原版，请重试喵～');clearTimeout(timer);el('connection').textContent=d.reason==='accessibility'?'辅助功能权限不可用':d.reason==='hide_unconfirmed'?'原版窗口隐藏未确认':d.reason==='controls_unavailable'?'原版工具栏暂不可用，接管已取消':'原版人物暂停未确认';}
 };
 async function startRecording(){
  if(browserPreview)return;
@@ -345,11 +333,9 @@ window.catfoodToggleMonitoring=async()=>{
  try{if(!csrf)throw Error('正在连接猫粮，请稍后再试喵～');return await(recordingActive?finishRecording():startRecording());}
  finally{launcherToggleBusy=false;native('toggleSettled');}
 };
-el('historyToggle').onclick=()=>{closeContextMenus();el('outfitPanel').hidden=true;el('historyPanel').hidden=false;recordAction('status').catch(()=>{});};el('closeHistory').onclick=()=>el('historyPanel').hidden=true;
+el('historyToggle').onclick=()=>{closeContextMenus();el('outfitPanel').hidden=true;el('historyPanel').hidden=false;window.catfoodRefreshDiary?.(true);recordAction('status').catch(()=>{});};el('closeHistory').onclick=()=>el('historyPanel').hidden=true;
 async function retryMemory(){const d=await recordAction('retry');if(d)say(d.pending_memory?'互动已保存，正在重试记忆同步喵～':'已写入 YUI 的记忆喵～');}
 el('retryMemory').onclick=()=>{el('menu').hidden=true;retryMemory().catch(()=>{});};el('historyRetry').onclick=()=>retryMemory().catch(()=>{});
 document.body.classList.add('record-inactive');
 const beginRecording=setInterval(async()=>{if(!csrf)return;clearInterval(beginRecording);try{const d=await recordAction('status');if(browserPreview)return;if(d?.active){requestNativeTakeover();}else if(!d?.initialized&&!window.catfoodLauncherOnly)await startRecording();}catch{}},200);
 let recordPollBusy=false;setInterval(async()=>{if(!csrf||exiting||recordPollBusy)return;recordPollBusy=true;try{const wasActive=recordingActive;const d=await recordAction('status');if(!browserPreview&&d?.active&&!wasActive){document.body.classList.add('record-inactive');if(!requestNativeTakeover())await recordAction('end');}}catch{}finally{recordPollBusy=false;}},1000);
-
-window.addEventListener('catfood:musicbeat',()=>{bounce('character');});

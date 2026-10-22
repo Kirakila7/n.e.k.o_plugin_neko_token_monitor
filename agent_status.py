@@ -1,5 +1,6 @@
 """Read-only agent activity from N.E.K.O. tasks and optional CrossPet hooks."""
 
+import hashlib
 import json
 import os
 import threading
@@ -115,11 +116,38 @@ class AgentStatus:
         self.neko_checked = float("-inf")
         self.neko_cached = {"status": "unknown"}
         self.neko_refreshing = False
+        self.task_states = {}
+        self.completion_events = []
 
     def _read_neko(self):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open("http://127.0.0.1:48911/api/agent/tasks", timeout=2) as response:
-            return classify(json.loads(response.read(1048576)))
+            payload = json.loads(response.read(1048576))
+        result = classify(payload)
+        if result["status"] != "unknown":
+            result["tasks"] = [
+                {"id": str(row.get("task_id") or row.get("id")), "status": row["status"]}
+                for row in payload["tasks"]
+                if isinstance(row.get("task_id") or row.get("id"), (str, int))
+                and not isinstance(row.get("task_id") or row.get("id"), bool)
+                and 0 < len(str(row.get("task_id") or row.get("id"))) <= 160
+            ]
+        return result
+
+    def observe_tasks(self, result, now=None):
+        """Only a known task entering completed is a completion; idle/poses are not."""
+        if result.get("status") == "unknown" or "tasks" not in result:
+            return
+        now = time.time() if now is None else now
+        rows = {row["id"]: row["status"] for row in result["tasks"]}
+        for identifier, status in rows.items():
+            if status == "completed" and self.task_states.get(identifier) in ("queued", "running"):
+                self.completion_events.append({
+                    "id": "neko-" + hashlib.sha256(identifier.encode()).hexdigest(),
+                    "status": "completed", "source": "neko_tasks", "agent": "N.E.K.O Agent", "at": now,
+                })
+        self.task_states = rows
+        self.completion_events = [event for event in self.completion_events if 0 <= now - event["at"] <= 120][-100:]
 
     def _refresh_neko(self):
         try:
@@ -127,6 +155,7 @@ class AgentStatus:
         except Exception:
             neko = {"status": "unknown"}
         with self.lock:
+            self.observe_tasks(neko)
             self.neko_cached = neko
             self.neko_checked = time.monotonic()
             self.neko_refreshing = False
@@ -148,5 +177,7 @@ class AgentStatus:
                 active.append({"id": "neko", "name": "N.E.K.O Agent", "activity": "running"})
             status = "busy" if active else "idle" if neko["status"] == "idle" or local["seen"] else "unknown"
             return {"status": status, "active_agents": active, "neko_status": neko["status"],
+                    "completed_events": [dict(event) for event in self.completion_events if 0 <= time.time() - event["at"] <= 120],
+                    "completion_source": "N.E.K.O 明确完成的任务；应用空闲与 CrossPet 姿态不算完成",
                     "source": "CrossPet 本机事件" if local["seen"] else "N.E.K.O 任务",
                     "poll_interval_ms": 500, "local_cache_ms": 200}

@@ -5,6 +5,13 @@ def balance_answer(state):
     config = state.get("config") or {}
     source = config.get("source")
     model = config.get("model") or "当前模型"
+    a = state.get('allowance')
+    if isinstance(a, dict) and a.get('schema_version') == 1:
+        if a.get('value') is None:
+            return f"暂时读不到 {model} 的猫粮额度（{a['status_label']}），不会把未知额度当作零喵～"
+        prefix = '上次记录' if a['status'] in ('stale', 'conflict') else '手动记录' if a['status'] == 'manual' else '当前读数'
+        label = '已上报用量' if a['metric'] == 'usage_total' else '预算剩余' if a['metric'] == 'budget_remaining' else '猫粮余额'
+        return f"{model} 的{label}：{a['value']} {a['unit']}（{prefix}；{a['basis']}）喵～"
 
     if source == "desktop_quota" and config.get("quota_mode", "auto") == "auto":
         row = state.get("account_quota") or {}

@@ -12,6 +12,14 @@
 		<data>
 		JlD2bmHmqW8UQd4+iaKXJqaspP4=
 		</data>
+		<key>Resources/yui-camera-off.png</key>
+		<data>
+		cE/SObCgnbHsQ27oXbELOCxIuZg=
+		</data>
+		<key>Resources/yui-camera-on.png</key>
+		<data>
+		TnK2fud1FH9GSGnZRFZnJuP/NPA=
+		</data>
 	</dict>
 	<key>files2</key>
 	<dict>
@@ -27,6 +35,20 @@
 			<key>hash2</key>
 			<data>
 			aAQv4DUpLo8/mCXdpzMjveUq+7v/gwYMyF7bdkTbisE=
+			</data>
+		</dict>
+		<key>Resources/yui-camera-off.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			pn4pNomkLlCM7POUNumKmPZgy0yeDOqnDvTPzh4POcs=
+			</data>
+		</dict>
+		<key>Resources/yui-camera-on.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			EccwN980RivEbkVNEUAlLX3ifgobGPHKx/Tb3O9nLrY=
 			</data>
 		</dict>
 	</dict>

@@ -4,6 +4,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from .host_layout import HostLayout
 from .topup import open_official
@@ -64,10 +65,22 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                 return self.send(200, host_layout.snapshot())
             if path == "/api/status":
                 return self.send(200, dict(monitor.snapshot(), csrf=csrf))
+            if path == '/api/allowance':
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if set(query) - {'profile'} or any(len(v) != 1 or not v[0] for v in query.values()):
+                    return self.send(400, {'error': '额度档案参数无效'})
+                if not hasattr(monitor, 'allowance_history'):
+                    return self.send(404, {'error': '此宿主尚未提供读数记录'})
+                try:
+                    return self.send(200, monitor.allowance_history(query.get('profile', [None])[0]))
+                except ValueError as exc:
+                    return self.send(400, {'error': str(exc)})
             if path == "/api/tracking":
                 return self.send(200, monitor.tracking())
             if path == "/api/agent":
                 return self.send(200, agent_status.snapshot() if agent_status else {"status": "unknown"})
+            if path == "/api/diary":
+                return self.send(200, recording.diary() if recording and hasattr(recording, "diary") else {"entries": [], "seconds": 0, "pet": 0, "ask": 0})
             if path == "/api/rhythm":
                 return self.send(200, rhythm.snapshot() if rhythm else {"enabled": False, "active": False, "supported": False})
             if path == "/api/care":
@@ -78,6 +91,9 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                 "/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
                 "/topup.js": ("topup.js", "text/javascript; charset=utf-8"),
                 "/quota-mood.js": ("quota-mood.js", "text/javascript; charset=utf-8"),
+                "/quota-display.js": ("quota-display.js", "text/javascript; charset=utf-8"),
+                "/food-bags.js": ("food-bags.js", "text/javascript; charset=utf-8"),
+                "/food-bags.css": ("food-bags.css", "text/css; charset=utf-8"),
                 "/chase-motion.js": ("chase-motion.js", "text/javascript; charset=utf-8"),
                 "/chase-stage.js": ("chase-stage.js", "text/javascript; charset=utf-8"),
                 "/whale-clips.js": ("whale-clips.js", "text/javascript; charset=utf-8"),
@@ -85,6 +101,10 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                 "/chase-game.js": ("chase-game.js", "text/javascript; charset=utf-8"),
                 "/chase-play.js": ("chase-play.js", "text/javascript; charset=utf-8"),
                 "/care.js": ("care.js", "text/javascript; charset=utf-8"),
+                "/quiet.js": ("quiet.js", "text/javascript; charset=utf-8"),
+                "/diary.js": ("diary.js", "text/javascript; charset=utf-8"),
+                "/notice": ("notice.html", "text/html; charset=utf-8"),
+                "/quiet.css": ("quiet.css", "text/css; charset=utf-8"),
                 "/chase-window.js": ("chase-window.js", "text/javascript; charset=utf-8"),
                 "/quota-reactions.js": ("quota-reactions.js", "text/javascript; charset=utf-8"),
                 "/chase.css": ("chase.css", "text/css; charset=utf-8"),
@@ -107,17 +127,17 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                 "/chase/yui-frightened-run.png": ("chase/yui-frightened-run.png", "image/png"),
                 "/settings.css": ("settings.css", "text/css; charset=utf-8"),
                 "/account-page.js": ("account-page.js", "text/javascript; charset=utf-8"),
-                "/music.js": ("music.js", "text/javascript; charset=utf-8"),
                 "/rhythm.js": ("rhythm.js", "text/javascript; charset=utf-8"),
                 "/rhythm-motion.js": ("rhythm-motion.js", "text/javascript; charset=utf-8"),
-                "/music-grain.wav": ("music-grain.wav", "audio/wav"),
-                "/music-score.json": ("music-score.json", "application/json; charset=utf-8"),
                 "/widget.js": ("widget.js", "text/javascript; charset=utf-8"),
                 "/widget.css": ("widget.css", "text/css; charset=utf-8"),
                 "/outfits.js": ("outfits.js", "text/javascript; charset=utf-8"),
                 "/yui-chibi.png": ("yui-chibi.png", "image/png"),
                 "/app.js": ("app.js", "text/javascript; charset=utf-8"),
             }
+            names["/brands/workbuddy.svg"] = ("brands/workbuddy.svg", "image/svg+xml")
+            for brand in ("codex", "gpt", "claude", "deepseek", "trae", "gemini", "kimi", "qwen"):
+                names[f"/brands/{brand}.png"] = (f"brands/{brand}.png", "image/png")
             for outfit in ("gpt", "claude", "deepseek", "gemini", "glm", "kimi", "qwen", "doubao", "jev"):
                 names[f"/outfits/{outfit}.png"] = (f"outfits/{outfit}.png", "image/png")
             if path not in names:
@@ -151,6 +171,7 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                         recording.action(
                             body.get("action", "status"), body.get("event_id"), body.get("session_id"),
                             body.get("kind"), body.get("message"),
+                            **({"at": body["at"]} if "at" in body else {}),
                         ) if recording else {"active": False}
                     )
                     if takeover and result.get("active"):
@@ -159,6 +180,13 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                 if self.path == "/api/care":
                     if companion is None:
                         return self.send(503, {"error": "YUI 提醒服务尚未启动"})
+                    if "action" in body:
+                        if set(body) != {"action", "notice_id"}:
+                            raise ValueError("提醒操作无效")
+                        try:
+                            return self.send(200, companion.respond(body["action"], body["notice_id"]))
+                        except ValueError as error:
+                            return self.send(400, {"error": str(error)})
                     return self.send(200, companion.configure(body))
                 if self.path == "/api/takeover":
                     if takeover is None or not isinstance(body.get("session_id"), str) or type(body.get("ok")) is not bool:
@@ -171,7 +199,10 @@ def start_server(monitor, port=48923, request_reply=None, agent_status=None, rec
                     if state.get("id") != body["session_id"] or (body["ok"] and not state.get("active")):
                         return self.send(200, {"accepted": False})
                     takeover.begin(state["id"])
-                    return self.send(200, {"accepted": takeover.report(body["session_id"], body["ok"], body.get("reason"))})
+                    accepted = takeover.report(body["session_id"], body["ok"], body.get("reason"))
+                    if accepted and body["ok"] and hasattr(recording, "mark_presence"):
+                        recording.mark_presence(body["session_id"])
+                    return self.send(200, {"accepted": accepted})
                 if self.path == "/api/usage":
                     return self.send(200, monitor.record_usage(body))
                 if self.path == "/api/select":

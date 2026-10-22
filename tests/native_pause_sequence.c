@@ -90,12 +90,31 @@ static void ignored_press_requires_reveal_before_recovery(void) {
     assert(s.attempts == 2 && !s.exhausted);
 }
 
+static void missing_controls_cancel_without_any_press(void) {
+    CatFoodPauseSequence s = {0};
+    assert(CatFoodPauseNext(&s, 0, true, false, false) == CatFoodPausePrepare);
+    CatFoodPausePrepared(&s, 0);
+    assert(CatFoodPauseNext(&s, 2.99, true, false, false) == CatFoodPauseReveal);
+    assert(CatFoodPauseNext(&s, 3, true, false, false) == CatFoodPauseExhausted);
+    assert(s.missing && s.exhausted && s.attempts == 0);
+    assert(CatFoodPauseNext(&s, 4, true, true, false) == CatFoodPauseExhausted);
+    s = (CatFoodPauseSequence){0};
+    CatFoodPauseNext(&s, 10, true, false, false);
+    CatFoodPausePrepared(&s, 10);
+    assert(CatFoodPauseNext(&s, 12, true, true, false) == CatFoodPausePress);
+    assert(!s.missing && !s.exhausted);
+    CatFoodPauseNext(&s, 20, true, false, false);
+    assert(CatFoodPauseNext(&s, 22.9, true, false, false) != CatFoodPauseExhausted);
+    assert(CatFoodPauseNext(&s, 23, true, false, false) == CatFoodPauseExhausted);
+}
+
 int main(void) {
     focus_before_press();
     accepted_without_transition_refocuses();
     delayed_confirmation_and_flicker();
     bounded_failure_and_control_discovery();
     ignored_press_requires_reveal_before_recovery();
+    missing_controls_cancel_without_any_press();
     puts("PASS: focus before click, accepted-but-unconfirmed recovery, delayed/flickering state, no return toggle, bounded retries, hidden controls and reset");
     return 0;
 }

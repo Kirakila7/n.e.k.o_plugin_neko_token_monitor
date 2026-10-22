@@ -3,7 +3,6 @@
 #import <ApplicationServices/ApplicationServices.h>
 #include <signal.h>
 #include <math.h>
-#import "host-layout.h"
 #import "pause-sequence.h"
 static volatile sig_atomic_t stopping=0;
 static void stopWidget(int signalNumber){stopping=1;}
@@ -11,8 +10,6 @@ static void stopWidget(int signalNumber){stopping=1;}
 @interface CatFoodHostPause : NSObject {
 @public CatFoodPauseSequence sequence;
 }
-@property double controlHoveredAt;
-@property CGPoint controlHoverPoint;
 @end
 @implementation CatFoodHostPause
 @end
@@ -58,8 +55,18 @@ static BOOL CatFoodRect(id value,NSRect *rect){
 @property WKWebView *web;
 @property NSPanel *launcherPanel;
 @property NSButton *launcherButton;
+@property NSProgressIndicator *launcherBusyIndicator;
+@property NSImage *launcherOnImage;
+@property NSImage *launcherOffImage;
+@property NSRect launcherBubbleRect;
+@property BOOL launcherHasBubbleRect;
 @property BOOL launcherRequest;
 @property BOOL webReady;
+@property NSPanel *quietNoticePanel;
+@property WKWebView *quietNoticeWeb;
+@property NSString *quietNoticeId;
+@property NSMutableArray<NSString *> *quietNoticeSeen;
+@property BOOL quietNoticePolling;
 @property NSPoint dragMouse;
 @property NSPoint dragOrigin;
 @property BOOL dragging;
@@ -73,18 +80,12 @@ static BOOL CatFoodRect(id value,NSRect *rect){
 @property BOOL accessibilityPrompted;
 @property NSInteger hideAttempts;
 @property NSMutableSet<NSNumber *> *accessibilityHiddenApps;
-@property BOOL movedPointer;
-@property CGPoint savedPointer;
-@property CGPoint lastHoverPoint;
 @property NSMutableDictionary<NSNumber *, CatFoodHostPause *> *pauseSequences;
 @property BOOL retryScheduled;
 @property NSInteger takeoverGeneration;
 @property CFAbsoluteTime takeoverStarted;
 @property BOOL takeoverReported;
-@property NSDictionary *hostLayout;
-@property BOOL hostLayoutLoading;
-@property CFAbsoluteTime hostLayoutRequestedAt;
-@property NSMutableDictionary<NSNumber *, NSNumber *> *hostHoverAttempts;
+@property BOOL takeoverFailed;
 @property BOOL restoring;
 @property BOOL terminationPending;
 @property CFAbsoluteTime restoreStarted;
@@ -113,6 +114,9 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     if(self.isolatedPreview&&[previewPort isKindOfClass:NSNumber.class]&&[previewPort integerValue]>1024&&[previewPort integerValue]<65536)self.serverPort=[previewPort integerValue];
     self.base=[NSString stringWithFormat:@"http://127.0.0.1:%ld",(long)self.serverPort];
     self.parent=getppid();
+    NSArray *seen=[NSUserDefaults.standardUserDefaults arrayForKey:@"CatfoodQuietNoticeSeen"];
+    self.quietNoticeSeen=[NSMutableArray new];
+    for(id value in seen)if([value isKindOfClass:NSString.class]&&[[NSUUID alloc]initWithUUIDString:value])[self.quietNoticeSeen addObject:value];
     NSArray *arguments=NSProcessInfo.processInfo.arguments;
     NSUInteger directoryFlag=[arguments indexOfObject:@"--recording-dir"];
     if(directoryFlag!=NSNotFound&&directoryFlag+1<arguments.count&&[arguments[directoryFlag+1] isAbsolutePath])self.recordingDirectory=arguments[directoryFlag+1];
@@ -124,7 +128,6 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     self.restoreAttemptTimes=[NSMutableDictionary new];
     self.restoreConfirmations=[NSMutableDictionary new];
     self.pauseSequences=[NSMutableDictionary new];
-    self.hostHoverAttempts=[NSMutableDictionary new];
     signal(SIGTERM,stopWidget);
     self.panel=[[InputPanel alloc] initWithContentRect:NSMakeRect(0,0,400,self.isolatedPreview?560:404) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
     self.panel.title=self.isolatedPreview?@"猫粮隔离测试":@"猫粮";
@@ -135,6 +138,10 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     [self.panel setFrameOrigin:NSMakePoint(NSMaxX(screen)-420,NSMinY(screen)+20)];
     WKWebViewConfiguration *config=[WKWebViewConfiguration new];
     [config.userContentController addScriptMessageHandler:self name:@"nekoWidget"];
+    NSData *seenData=[NSJSONSerialization dataWithJSONObject:self.quietNoticeSeen options:0 error:nil];
+    NSString *seenJSON=[[NSString alloc]initWithData:seenData encoding:NSUTF8StringEncoding];
+    [config.userContentController addUserScript:[[WKUserScript alloc]initWithSource:[NSString stringWithFormat:@"window.catfoodNativeQuietSeenIds=%@;",seenJSON] injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+    if(!self.isolatedPreview)[config.userContentController addUserScript:[[WKUserScript alloc]initWithSource:@"window.catfoodHasLauncher=true;" injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     BOOL launcherOnly=!self.isolatedPreview&&[arguments containsObject:@"--launcher-only"];
     if(launcherOnly)[config.userContentController addUserScript:[[WKUserScript alloc]initWithSource:@"window.catfoodLauncherOnly=true;" injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     self.web=[[WKWebView alloc] initWithFrame:NSMakeRect(0,0,400,404) configuration:config];
@@ -149,42 +156,138 @@ static BOOL CatFoodRect(id value,NSRect *rect){
         if((stopping||(!self.isolatedPreview&&(getppid()!=self.parent||kill(self.parent,0)!=0)))&&!self.terminationPending)[NSApp terminate:nil];
         else if(!self.isolatedPreview&&self.recording&&!self.retryScheduled)[self hideOriginal];
         if(self.chaseWanted&&CFAbsoluteTimeGetCurrent()-self.chaseLease>5)[self stopChase];
+        if(!stopping&&!self.terminationPending)[self pollQuietNotices];
     }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){
         if(self.chasePanel)[self.chasePanel setFrame:(self.panel.screen?:NSScreen.mainScreen).visibleFrame display:YES];
+        [self positionLauncher];
     }];
 }
 - (void)createLauncher {
-    NSRect area=NSScreen.mainScreen.visibleFrame;
-    self.launcherPanel=[[InputPanel alloc]initWithContentRect:NSMakeRect(NSMaxX(area)-68,NSMinY(area)+438,48,48) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
-    self.launcherPanel.title=@"猫粮监控开关";self.launcherPanel.opaque=NO;self.launcherPanel.backgroundColor=NSColor.clearColor;self.launcherPanel.hasShadow=YES;
+    self.launcherPanel=[[InputPanel alloc]initWithContentRect:NSMakeRect(0,0,88,88) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    self.launcherPanel.title=@"猫粮摄像头开关";self.launcherPanel.opaque=NO;self.launcherPanel.backgroundColor=NSColor.clearColor;self.launcherPanel.hasShadow=NO;
     self.launcherPanel.level=NSFloatingWindowLevel+1;self.launcherPanel.hidesOnDeactivate=NO;
     self.launcherPanel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
-    self.launcherButton=[[NSButton alloc]initWithFrame:NSMakeRect(0,0,48,48)];
+    self.launcherButton=[[NSButton alloc]initWithFrame:NSMakeRect(0,0,88,88)];
     self.launcherButton.bezelStyle=NSBezelStyleRegularSquare;self.launcherButton.bordered=NO;
-    self.launcherButton.wantsLayer=YES;self.launcherButton.layer.cornerRadius=14;
-    self.launcherButton.image=[NSImage imageWithSystemSymbolName:@"display" accessibilityDescription:@"猫粮监控"];
+    self.launcherOffImage=[[NSImage alloc]initWithContentsOfURL:[NSBundle.mainBundle URLForResource:@"yui-camera-off" withExtension:@"png"]];
+    self.launcherOnImage=[[NSImage alloc]initWithContentsOfURL:[NSBundle.mainBundle URLForResource:@"yui-camera-on" withExtension:@"png"]];
+    self.launcherOffImage.template=NO;self.launcherOnImage.template=NO;
+    [(NSButtonCell *)self.launcherButton.cell setImageDimsWhenDisabled:NO];
     self.launcherButton.imagePosition=NSImageOnly;self.launcherButton.imageScaling=NSImageScaleProportionallyUpOrDown;
     self.launcherButton.target=self;self.launcherButton.action=@selector(toggleMonitoring:);
+    NSMenu *cameraMenu=[NSMenu new];
+    NSMenuItem *cameraSettings=[[NSMenuItem alloc]initWithTitle:@"猫粮额度设置" action:@selector(showAccountSettings:) keyEquivalent:@""];
+    cameraSettings.target=self;[cameraMenu addItem:cameraSettings];self.launcherButton.menu=cameraMenu;
     self.launcherPanel.contentView=self.launcherButton;
+    self.launcherBusyIndicator=[[NSProgressIndicator alloc]initWithFrame:NSMakeRect(70,69,14,14)];
+    self.launcherBusyIndicator.style=NSProgressIndicatorStyleSpinning;
+    self.launcherBusyIndicator.displayedWhenStopped=NO;
+    self.launcherBusyIndicator.accessibilityLabel=@"正在确认监控状态";
+    [self.launcherButton addSubview:self.launcherBusyIndicator];
     NSMenu *menu=[NSMenu new];NSMenuItem *item=[NSMenuItem new];[menu addItem:item];
     NSMenu *appMenu=[[NSMenu alloc]initWithTitle:@"猫粮"];item.submenu=appMenu;
-    NSMenuItem *show=[[NSMenuItem alloc]initWithTitle:@"显示监控开关" action:@selector(showLauncher:) keyEquivalent:@"0"];
+    NSMenuItem *show=[[NSMenuItem alloc]initWithTitle:@"显示摄像头开关" action:@selector(showLauncher:) keyEquivalent:@"0"];
     show.target=self;[appMenu addItem:show];
+    NSMenuItem *settings=[[NSMenuItem alloc]initWithTitle:@"猫粮额度设置" action:@selector(showAccountSettings:) keyEquivalent:@","];
+    settings.target=self;[appMenu addItem:settings];
     NSMenuItem *toggle=[[NSMenuItem alloc]initWithTitle:@"切换猫粮监控" action:@selector(toggleMonitoring:) keyEquivalent:@"m"];
     toggle.keyEquivalentModifierMask=NSEventModifierFlagCommand|NSEventModifierFlagShift;toggle.target=self;[appMenu addItem:toggle];
     NSApp.mainMenu=menu;
-    [self updateLauncher];[self.launcherPanel orderFrontRegardless];
+    [self positionLauncher];[self updateLauncher];[self.launcherPanel orderFrontRegardless];
+}
+- (void)positionLauncher {
+    if(!self.launcherPanel)return;
+    NSRect owner=self.panel.frame,area=(self.panel.screen?:NSScreen.mainScreen).visibleFrame;
+    NSSize size=self.launcherPanel.frame.size;
+    // Use the rendered bubble bounds, so layout scaling keeps both top edges aligned.
+    CGFloat scale=fmin(1,NSHeight(owner)/450);
+    CGFloat right=self.launcherHasBubbleRect?NSMaxX(self.launcherBubbleRect):NSWidth(owner)/2+115*scale;
+    CGFloat top=self.launcherHasBubbleRect?NSMinY(self.launcherBubbleRect):(NSHeight(owner)-450*scale)/2+7*scale;
+    CGFloat x=fmax(NSMinX(area)+8,fmin(NSMaxX(area)-size.width-8,NSMinX(owner)+right+8));
+    CGFloat y=fmax(NSMinY(area)+8,fmin(NSMaxY(area)-size.height-8,NSMaxY(owner)-top-size.height));
+    [self.launcherPanel setFrameOrigin:NSMakePoint(x,y)];
 }
 - (void)showLauncher:(id)sender {[self.launcherPanel makeKeyAndOrderFront:nil];}
+- (void)showAccountSettings:(id)sender {
+    if(!self.webReady)return;
+    [self.panel makeKeyAndOrderFront:nil];
+    [self.web evaluateJavaScript:@"window.openAccount&&window.openAccount()" completionHandler:nil];
+}
 - (void)updateLauncher {
     BOOL busy=!self.webReady||self.launcherRequest||self.restoring||(self.recording&&!self.takeoverReported);
     BOOL active=self.recording&&self.takeoverReported;
     NSString *label=busy?@"猫粮切换中…":active?@"回到原版 YUI":@"进入猫粮监控";
     self.launcherButton.enabled=!busy;self.launcherButton.toolTip=label;
     self.launcherButton.accessibilityLabel=label;
-    self.launcherButton.contentTintColor=busy?NSColor.secondaryLabelColor:active?NSColor.systemGreenColor:NSColor.systemPurpleColor;
-    self.launcherButton.layer.backgroundColor=[NSColor colorWithWhite:1 alpha:0.94].CGColor;
+    self.launcherButton.accessibilityHelp=busy?@"正在切换，等待原版窗口确认。":active?@"红色镜头：猫粮监控中。点击恢复原版 YUI。":@"灰黑镜头：猫粮监控未运行。点击进入监控。";
+    self.launcherButton.image=active?self.launcherOnImage:self.launcherOffImage;
+    if(busy&&!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion)[self.launcherBusyIndicator startAnimation:nil];
+    else[self.launcherBusyIndicator stopAnimation:nil];
+}
+- (void)closeQuietNotice:(NSString *)identifier {
+    if(![identifier isKindOfClass:NSString.class]||![identifier isEqualToString:self.quietNoticeId])return;
+    [self.quietNoticePanel orderOut:nil];
+    NSData *data=[NSJSONSerialization dataWithJSONObject:@[identifier] options:0 error:nil];
+    NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+    [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodNoticeClosed&&window.catfoodNoticeClosed.apply(null,%@)",json] completionHandler:nil];
+    self.quietNoticeId=nil;
+}
+- (void)rememberQuietNotice:(NSString *)identifier {
+    if(![identifier isKindOfClass:NSString.class]||![[NSUUID alloc]initWithUUIDString:identifier])return;
+    if(![self.quietNoticeSeen containsObject:identifier]){
+        [self.quietNoticeSeen addObject:identifier];
+        if(self.quietNoticeSeen.count>300)[self.quietNoticeSeen removeObjectsInRange:NSMakeRange(0,self.quietNoticeSeen.count-300)];
+        [NSUserDefaults.standardUserDefaults setObject:self.quietNoticeSeen forKey:@"CatfoodQuietNoticeSeen"];
+    }
+    NSData *data=[NSJSONSerialization dataWithJSONObject:@[identifier] options:0 error:nil];
+    NSString *json=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+    [self.web evaluateJavaScript:[NSString stringWithFormat:@"window.catfoodNativeQuietSeen&&window.catfoodNativeQuietSeen.apply(null,%@)",json] completionHandler:nil];
+}
+- (void)pollQuietNotices {
+    if(self.quietNoticePolling||self.quietNoticeId||(self.recording&&self.takeoverReported&&self.panel.isVisible))return;
+    self.quietNoticePolling=YES;
+    NSMutableURLRequest *request=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:[self.base stringByAppendingString:@"/api/care"]]];
+    request.timeoutInterval=3;request.cachePolicy=NSURLRequestReloadIgnoringLocalCacheData;
+    [[NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
+        id payload=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
+        dispatch_async(dispatch_get_main_queue(),^{
+            self.quietNoticePolling=NO;
+            if(error||stopping||self.terminationPending||self.quietNoticeId||(self.recording&&self.takeoverReported&&self.panel.isVisible)||![payload isKindOfClass:NSDictionary.class]||![payload[@"notices"]isKindOfClass:NSArray.class])return;
+            NSDictionary *candidate=nil;
+            for(id notice in payload[@"notices"]){
+                if(![notice isKindOfClass:NSDictionary.class]||![notice[@"id"]isKindOfClass:NSString.class]||[self.quietNoticeSeen containsObject:notice[@"id"]])continue;
+                if(!candidate||[notice[@"kind"]isEqual:@"low_food"])candidate=notice;
+                if([notice[@"kind"]isEqual:@"low_food"])break;
+            }
+            if(candidate)[self showQuietNotice:candidate[@"id"] kind:candidate[@"kind"]];
+        });
+    }]resume];
+}
+- (void)showQuietNotice:(NSString *)identifier kind:(NSString *)kind {
+    if(![identifier isKindOfClass:NSString.class]||![[NSUUID alloc]initWithUUIDString:identifier]||![@[@"low_food",@"task_completed"]containsObject:kind])return;
+    if([identifier isEqualToString:self.quietNoticeId])return;
+    [self rememberQuietNotice:identifier];
+    BOOL alert=[kind isEqualToString:@"low_food"];
+    NSRect area=(self.panel.screen?:NSScreen.mainScreen).visibleFrame;
+    NSSize size=NSMakeSize(340,alert?238:146);
+    NSRect anchor=self.launcherPanel?self.launcherPanel.frame:self.panel.frame;
+    CGFloat x=fmax(NSMinX(area)+8,fmin(NSMaxX(area)-size.width-8,NSMaxX(anchor)-size.width));
+    CGFloat y=fmax(NSMinY(area)+8,fmin(NSMaxY(area)-size.height-8,NSMaxY(anchor)+10));
+    [self.quietNoticePanel orderOut:nil];
+    self.quietNoticePanel=[[InputPanel alloc]initWithContentRect:NSMakeRect(x,y,size.width,size.height) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    self.quietNoticePanel.title=@"YUI 的小纸条";self.quietNoticePanel.opaque=NO;self.quietNoticePanel.backgroundColor=NSColor.clearColor;self.quietNoticePanel.hasShadow=NO;
+    self.quietNoticePanel.level=NSFloatingWindowLevel+2;self.quietNoticePanel.hidesOnDeactivate=NO;
+    self.quietNoticePanel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
+    WKWebViewConfiguration *config=[WKWebViewConfiguration new];[config.userContentController addScriptMessageHandler:self name:@"nekoWidget"];
+    self.quietNoticeWeb=[[WKWebView alloc]initWithFrame:NSMakeRect(0,0,size.width,size.height) configuration:config];
+    self.quietNoticeWeb.navigationDelegate=self;[self.quietNoticeWeb setValue:@NO forKey:@"drawsBackground"];
+    self.quietNoticePanel.contentView=self.quietNoticeWeb;self.quietNoticeId=identifier;
+    NSURL *url=[NSURL URLWithString:[NSString stringWithFormat:@"%@/notice?id=%@",self.base,identifier]];
+    [self.quietNoticeWeb loadRequest:[NSURLRequest requestWithURL:url]];
+    // This panel is intentionally shown without key-window or app-activation calls.
+    [self.quietNoticePanel orderFrontRegardless];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((alert?22:6)*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[self closeQuietNotice:identifier];});
 }
 - (void)toggleMonitoring:(id)sender {
     if(!self.launcherButton.enabled)return;
@@ -356,59 +459,6 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     }
     CFRelease(root);return result;
 }
-- (void)restorePointer {
-    self.panel.ignoresMouseEvents=NO;
-    if(!self.movedPointer)return;
-    CGEventRef current=CGEventCreate(NULL);
-    CGPoint point=current?CGEventGetLocation(current):CGPointZero;
-    if(current)CFRelease(current);
-    if(hypot(point.x-self.lastHoverPoint.x,point.y-self.lastHoverPoint.y)<24){
-        CGEventRef move=CGEventCreateMouseEvent(NULL,kCGEventMouseMoved,self.savedPointer,kCGMouseButtonLeft);
-        if(move){CGEventPost(kCGHIDEventTap,move);CFRelease(move);}
-    }
-    self.movedPointer=NO;
-}
-- (void)refreshHostLayout {
-    if(self.hostLayoutLoading||CFAbsoluteTimeGetCurrent()-self.hostLayoutRequestedAt<1.0)return;
-    self.hostLayoutLoading=YES;self.hostLayoutRequestedAt=CFAbsoluteTimeGetCurrent();
-    NSInteger generation=self.takeoverGeneration;
-    NSURLRequest *request=[NSURLRequest requestWithURL:[NSURL URLWithString:[self.base stringByAppendingString:@"/api/host-layout"]]
-                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:2.5];
-    [[NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
-        id value=(!error&&data.length<16384)?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
-        dispatch_async(dispatch_get_main_queue(),^{
-            if(generation!=self.takeoverGeneration)return;
-            self.hostLayoutLoading=NO;
-            self.hostLayout=[value isKindOfClass:NSDictionary.class]&&[value[@"available"]isEqual:@YES]?value:nil;
-        });
-    }] resume];
-}
-- (BOOL)revealHostControls:(AXUIElementRef)host app:(NSRunningApplication *)app {
-    if(!self.hostLayout)[self refreshHostLayout];
-    CFTypeRef position=NULL,size=NULL;
-    AXUIElementCopyAttributeValue(host,kAXPositionAttribute,&position);
-    AXUIElementCopyAttributeValue(host,kAXSizeAttribute,&size);
-    CGPoint p=CGPointZero,target;CGSize z=CGSizeZero;
-    BOOL valid=position&&size&&CFGetTypeID(position)==AXValueGetTypeID()&&CFGetTypeID(size)==AXValueGetTypeID()
-        &&AXValueGetValue(position,kAXValueCGPointType,&p)&&AXValueGetValue(size,kAXValueCGSizeType,&z);
-    if(position)CFRelease(position);if(size)CFRelease(size);
-    NSNumber *pid=@(app.processIdentifier);NSUInteger attempt=self.hostHoverAttempts[pid].unsignedIntegerValue;
-    BOOL saved=valid&&attempt<5&&CatFoodHostHoverPoint(self.hostLayout,(CGRect){p,z},attempt,&target);
-    if(!valid||(!saved&&!CatFoodHostSearchPoint(self.hostLayout,(CGRect){p,z},attempt>=5?attempt-5:attempt,&target)))return NO;
-    self.hostHoverAttempts[pid]=@(attempt+1);
-    if(!self.movedPointer){
-        CGEventRef current=CGEventCreate(NULL);
-        if(current){self.savedPointer=CGEventGetLocation(current);CFRelease(current);self.movedPointer=YES;}
-    }
-    self.panel.ignoresMouseEvents=YES;[app activateWithOptions:0];
-    for(CGFloat shift=-2;shift<=0;shift+=2){
-        CGEventRef event=CGEventCreateMouseEvent(NULL,kCGEventMouseMoved,CGPointMake(target.x+shift,target.y),kCGMouseButtonLeft);
-        if(event){CGEventPost(kCGHIDEventTap,event);CFRelease(event);}
-    }
-    self.lastHoverPoint=target;
-    NSLog(@"CatFood %@ hover pid=%d frame=(%.0f,%.0f %.0fx%.0f) at=(%.0f,%.0f)",saved?@"saved-layout":@"window-search",app.processIdentifier,p.x,p.y,z.width,z.height,target.x,target.y);
-    return YES;
-}
 - (BOOL)hostControl:(NSString *)label app:(NSRunningApplication *)app press:(BOOL)press {
     NSUInteger strategy=self.restoring?MIN(3,(NSUInteger)((CFAbsoluteTimeGetCurrent()-self.restoreStarted)/2)):0;
     return [self hostControl:label app:app press:press strategy:strategy];
@@ -449,51 +499,6 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     }
     if(node)CFRelease(node);return matches;
 }
-- (BOOL)clickVerifiedControl:(AXUIElementRef)control host:(AXUIElementRef)host app:(NSRunningApplication *)app {
-    // A coordinate fallback is restricted to the current labelled control and
-    // its exact host window. Never click a saved model anchor or another app.
-    if(![self hostReadyForPause:app]||!app.active)return NO;
-    CGRect r,window;if(![self controlRect:control rect:&r]||![self controlRect:host rect:&window]
-        ||r.size.width>180||r.size.height>120)return NO;
-    CGPoint p=CGPointMake(CGRectGetMidX(r),CGRectGetMidY(r));
-    if(!CGRectContainsPoint(window,p))return NO;
-    AXUIElementRef application=AXUIElementCreateApplication(app.processIdentifier),hit=NULL;pid_t owner=0;
-    AXError status=AXUIElementCopyElementAtPosition(application,p.x,p.y,&hit);CFRelease(application);
-    BOOL sameProcess=hit&&AXUIElementGetPid(hit,&owner)==kAXErrorSuccess&&owner==app.processIdentifier;
-    CFTypeRef hitWindow=NULL;if(hit)AXUIElementCopyAttributeValue(hit,kAXWindowAttribute,&hitWindow);
-    BOOL sameWindow=hit&&([self control:hit descendsFrom:host]||(hitWindow&&CFEqual(hitWindow,host)));
-    BOOL related=hit&&([self control:hit descendsFrom:control]||[self control:control descendsFrom:hit]);
-    BOOL verified=status==kAXErrorSuccess&&sameProcess&&sameWindow&&related;
-    NSString *hitRole=hit?[self controlString:hit attribute:kAXRoleAttribute]:@"none";
-    if(hitWindow)CFRelease(hitWindow);
-    if(hit)CFRelease(hit);
-    if(!verified){NSLog(@"CatFood control hit-test rejected pid=%d owner=%d status=%d role=%@ same_window=%d related=%d",app.processIdentifier,owner,status,hitRole,sameWindow,related);return NO;}
-    // A process can own several overlapping windows. Bind the event to the
-    // verified main window, rather than whichever NEKO window is currently key.
-    CGWindowID number=0;NSUInteger matches=0;
-    CFArrayRef windows=CGWindowListCopyWindowInfo(kCGWindowListOptionAll,kCGNullWindowID);
-    for(NSDictionary *info in (__bridge NSArray *)windows){
-        if([info[(__bridge NSString *)kCGWindowOwnerPID]intValue]!=app.processIdentifier)continue;
-        CGRect candidate=CGRectZero;
-        if(!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)info[(__bridge NSString *)kCGWindowBounds],&candidate))continue;
-        if(fabs(candidate.origin.x-window.origin.x)>2||fabs(candidate.origin.y-window.origin.y)>2
-            ||fabs(candidate.size.width-window.size.width)>2||fabs(candidate.size.height-window.size.height)>2)continue;
-        number=[info[(__bridge NSString *)kCGWindowNumber]unsignedIntValue];matches++;
-    }
-    if(windows)CFRelease(windows);
-    if(matches!=1||!number){NSLog(@"CatFood host window number ambiguous matches=%lu",(unsigned long)matches);return NO;}
-    NSPoint local=NSMakePoint(p.x-window.origin.x,CGRectGetMaxY(window)-p.y);
-    for(NSNumber *kind in @[@(NSEventTypeLeftMouseDown),@(NSEventTypeLeftMouseUp)]){
-        NSEvent *mouse=[NSEvent mouseEventWithType:kind.unsignedIntegerValue location:local modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:number context:nil eventNumber:0 clickCount:1 pressure:kind.unsignedIntegerValue==NSEventTypeLeftMouseDown?1:0];
-        CGEventRef event=mouse.CGEvent;if(!event)return NO;
-        CGEventSetLocation(event,p);
-        CGEventSetIntegerValueField(event,kCGMouseEventWindowUnderMousePointer,number);
-        CGEventSetIntegerValueField(event,kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent,number);
-        CGEventPostToPid(app.processIdentifier,event);
-        if(kind.unsignedIntegerValue==NSEventTypeLeftMouseDown)[NSThread sleepForTimeInterval:0.06];
-    }
-    NSLog(@"CatFood verified control click pid=%d window=%u at=(%.0f,%.0f)",app.processIdentifier,number,p.x,p.y);return YES;
-}
 - (BOOL)hostControl:(NSString *)label app:(NSRunningApplication *)app press:(BOOL)press strategy:(NSUInteger)strategy {
     if(!AXIsProcessTrusted()||![self isNeko:app]||app.terminated)return NO;
     AXUIElementRef root=AXUIElementCreateApplication(app.processIdentifier);
@@ -521,9 +526,8 @@ static BOOL CatFoodRect(id value,NSRect *rect){
         AXUIElementRef target=ordered.count?(__bridge AXUIElementRef)ordered[MIN(strategy,ordered.count-1)]:control;
         NSString *role=[self controlString:target attribute:kAXRoleAttribute];
         NSString *identifier=[self controlString:target attribute:kAXIdentifierAttribute];CGRect r=CGRectZero;[self controlRect:target rect:&r];
-        BOOL clicked=(strategy>=2||!ordered.count)&&[self clickVerifiedControl:target host:host app:app];
-        AXError status=clicked?kAXErrorSuccess:AXUIElementPerformAction(target,kAXPressAction);
-        NSLog(@"CatFood host control %@ strategy=%lu role=%@ id=%@ candidates=%lu frame=(%.0f,%.0f %.0fx%.0f) status=%d verified_click=%d",label,(unsigned long)strategy,role,identifier,(unsigned long)ordered.count,r.origin.x,r.origin.y,r.size.width,r.size.height,status,clicked);
+        AXError status=ordered.count?AXUIElementPerformAction(target,kAXPressAction):kAXErrorActionUnsupported;
+        NSLog(@"CatFood host control %@ strategy=%lu role=%@ id=%@ candidates=%lu frame=(%.0f,%.0f %.0fx%.0f) status=%d ax_only=1",label,(unsigned long)strategy,role,identifier,(unsigned long)ordered.count,r.origin.x,r.origin.y,r.size.width,r.size.height,status);
         result=status==kAXErrorSuccess;
     }
     if(control)CFRelease(control);CFRelease(host);CFRelease(root);return result;
@@ -566,7 +570,16 @@ static BOOL CatFoodRect(id value,NSRect *rect){
 - (BOOL)pauseOriginal:(NSRunningApplication *)app {
     NSNumber *pid=@(app.processIdentifier);
     CatFoodHostPause *progress=self.pauseSequences[pid];
-    if(!progress){progress=[CatFoodHostPause new];self.pauseSequences[pid]=progress;}
+    if(!progress){
+        progress=[CatFoodHostPause new];self.pauseSequences[pid]=progress;
+        // Electron documents this opt-in for assistive tools. Without it,
+        // Chromium may expose labels but omit actionable button ancestors.
+        AXUIElementRef root=AXUIElementCreateApplication(app.processIdentifier);
+        AXUIElementSetMessagingTimeout(root,0.5);
+        AXError enabled=AXUIElementSetAttributeValue(root,CFSTR("AXManualAccessibility"),kCFBooleanTrue);
+        NSLog(@"CatFood host accessibility pid=%d status=%d",app.processIdentifier,enabled);
+        CFRelease(root);
+    }
     BOOL returned=[self hostControl:@"请她回来" app:app press:NO];
     BOOL goodbye=[self hostControl:@"请她离开" app:app press:NO];
     BOOL ready=[self hostReadyForPause:app];
@@ -580,45 +593,17 @@ static BOOL CatFoodRect(id value,NSRect *rect){
             break;
         }
         case CatFoodPausePress:{
-            // Hover the actual labelled control, not just the model anchor.
-            // Electron's mouse-through region and toolbar animation settle
-            // asynchronously; keeping the pointer elsewhere can swallow clicks.
-            AXUIElementRef root=AXUIElementCreateApplication(app.processIdentifier);
-            AXUIElementRef host=[self mainHostWindow:root];
-            AXUIElementRef control=[self findControl:@"请她离开" root:host depth:0];CGRect r;
-            BOOL hasRect=control&&[self controlRect:control rect:&r];
-            if(control)CFRelease(control);CFRelease(host);CFRelease(root);
-            if(hasRect){
-                CGPoint p=CGPointMake(CGRectGetMidX(r),CGRectGetMidY(r));
-                if(!progress.controlHoveredAt||hypot(p.x-progress.controlHoverPoint.x,p.y-progress.controlHoverPoint.y)>12){
-                    if(!self.movedPointer){CGEventRef current=CGEventCreate(NULL);if(current){self.savedPointer=CGEventGetLocation(current);CFRelease(current);self.movedPointer=YES;}}
-                    self.panel.ignoresMouseEvents=YES;
-                    CGEventRef move=CGEventCreateMouseEvent(NULL,kCGEventMouseMoved,p,kCGMouseButtonLeft);
-                    if(move){CGEventPost(kCGHIDEventTap,move);CFRelease(move);}
-                    self.lastHoverPoint=p;progress.controlHoverPoint=p;progress.controlHoveredAt=now;
-                    NSLog(@"CatFood control hover pid=%d at=(%.0f,%.0f)",app.processIdentifier,p.x,p.y);
-                    break;
-                }
-                if(now-progress.controlHoveredAt<0.35)break;
-            }
             BOOL accepted=[self hostControl:@"请她离开" app:app press:YES strategy:progress->sequence.attempts];
             CatFoodPausePressed(&progress->sequence,NSProcessInfo.processInfo.systemUptime,accepted);
-            progress.controlHoveredAt=0;
             if(accepted)self.pausedApps[pid]=app;
             NSLog(@"CatFood pause press pid=%d attempt=%u accepted=%d ready=%d",app.processIdentifier,progress->sequence.attempts,accepted,ready);
             break;
         }
-        case CatFoodPauseReveal:{
-            AXUIElementRef root=AXUIElementCreateApplication(app.processIdentifier);
-            AXUIElementRef host=[self mainHostWindow:root];
-            BOOL revealed=[self revealHostControls:host app:app];
-            if(revealed&&!progress->sequence.reacquired){
-                CatFoodPauseRevealed(&progress->sequence,NSProcessInfo.processInfo.systemUptime);
-                NSLog(@"CatFood pause reacquired pid=%d attempts=%u",app.processIdentifier,progress->sequence.attempts);
-            }
-            CFRelease(host);CFRelease(root);
+        case CatFoodPauseReveal:
+            // Only re-read labelled accessibility controls. Never synthesize
+            // hover or coordinate clicks to make a hidden toolbar appear.
+            if(goodbye)CatFoodPauseRevealed(&progress->sequence,now);
             break;
-        }
         case CatFoodPauseConfirmed:
             NSLog(@"CatFood pause confirmed pid=%d attempts=%u stable=1",app.processIdentifier,progress->sequence.attempts);
             return YES;
@@ -630,7 +615,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     return NO;
 }
 - (void)hideOriginal {
-    if(!self.recording)return;
+    if(!self.recording||self.takeoverFailed)return;
     if(!self.takeoverStarted)self.takeoverStarted=CFAbsoluteTimeGetCurrent();
     NSUInteger found=0;BOOL ok=YES,exhausted=NO;NSString *reason=@"host_not_found";
     for(NSRunningApplication *app in NSWorkspace.sharedWorkspace.runningApplications){
@@ -641,7 +626,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
         if(![self pauseOriginal:app]){
             ok=NO;reason=@"pause_unconfirmed";
             CatFoodHostPause *progress=self.pauseSequences[pid];
-            if(progress&&progress->sequence.exhausted)exhausted=YES;
+            if(progress&&progress->sequence.exhausted){exhausted=YES;if(progress->sequence.missing)reason=@"controls_unavailable";}
             continue;
         }
         [self.confirmedPausedApps addObject:pid];
@@ -662,11 +647,10 @@ static BOOL CatFoodRect(id value,NSRect *rect){
             }
         }
     }
-    if((!ok||found==0)&&!exhausted&&CFAbsoluteTimeGetCurrent()-self.takeoverStarted<32.0){
+    if((!ok||found==0)&&!exhausted&&CFAbsoluteTimeGetCurrent()-self.takeoverStarted<12.0){
         if(self.retryScheduled)return;
         self.retryScheduled=YES;NSInteger generation=self.takeoverGeneration;
-        BOOL searching=self.hostHoverAttempts.allValues.count&&[[self.hostHoverAttempts.allValues valueForKeyPath:@"@max.self"]integerValue]>=5;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((searching?0.08:0.35)*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(0.2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
             if(!self.recording||generation!=self.takeoverGeneration)return;
             self.retryScheduled=NO;[self hideOriginal];
         });
@@ -674,10 +658,18 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     }
     BOOL confirmed=found>0&&ok;
     if(confirmed)self.takeoverStarted=0;
-    [self restorePointer];
     if(confirmed&&self.takeoverReported)return;
     NSLog(@"CatFood takeover result targets=%lu ok=%d reason=%@",(unsigned long)found,confirmed,confirmed?@"confirmed":reason);
     self.takeoverReported=confirmed;
+    if(!confirmed){
+        self.takeoverFailed=YES;
+        NSInteger generation=self.takeoverGeneration;
+        // Give the UI time to report the failure before its session is closed.
+        // A missing or crashed UI still gets bounded native restoration.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)NSEC_PER_SEC),dispatch_get_main_queue(),^{
+            if(self.recording&&self.takeoverFailed&&generation==self.takeoverGeneration)[self restoreOriginal];
+        });
+    }
     [self reportNativeState:confirmed reason:confirmed?nil:reason];
 }
 - (void)reportNativeState:(BOOL)ok reason:(NSString *)reason {
@@ -697,9 +689,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     self.takeoverGeneration++;self.retryScheduled=NO;self.takeoverStarted=0;self.takeoverReported=NO;
     if(self.isolatedPreview)return;
     self.restoring=YES;self.restoreStarted=CFAbsoluteTimeGetCurrent();[self updateLauncher];
-    [self restorePointer];
     [self.restoreAttemptTimes removeAllObjects];[self.restoreConfirmations removeAllObjects];
-    [self.hostHoverAttempts removeAllObjects];
     for(NSRunningApplication *app in self.hiddenApps.allValues)if(!app.terminated){
         [app unhide];
         if([self.accessibilityHiddenApps containsObject:@(app.processIdentifier)])[self setAccessibilityHidden:NO app:app];
@@ -734,7 +724,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
             self.restoreConfirmations[pid]=@0;
             if(!hidden&&returned&&now-self.restoreAttemptTimes[pid].doubleValue>=1.5){
                 [self hostControl:@"请她回来" app:app press:YES];self.restoreAttemptTimes[pid]=@(now);
-            }else if(!hidden&&!returned)[self revealHostControls:host app:app];
+            }
         }
         CFRelease(host);CFRelease(root);
         if(self.restoreConfirmations[pid].integerValue<2)all=NO;
@@ -744,12 +734,10 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     }
     for(NSNumber *pid in targets)NSLog(@"CatFood restore pid=%@ window_confirmed=%d model_confirmed=%d",pid,![self isHostHidden:targets[pid]],self.restoreConfirmations[pid].integerValue>=2);
     NSLog(@"CatFood restore result ok=%d seconds=%.3f",all,now-self.restoreStarted);
-    [self restorePointer];
     [self.minimizedApps removeAllObjects];[self.accessibilityHiddenApps removeAllObjects];[self.hiddenApps removeAllObjects];
     [self.pausedApps removeAllObjects];
     [self.confirmedPausedApps removeAllObjects];
     [self.pauseSequences removeAllObjects];
-    [self.hostHoverAttempts removeAllObjects];self.hostLayout=nil;self.hostLayoutLoading=NO;self.hostLayoutRequestedAt=0;
     self.restoring=NO;
     [self updateLauncher];
     if(self.terminationPending){self.terminationPending=NO;[NSApp replyToApplicationShouldTerminate:YES];}
@@ -789,6 +777,10 @@ static BOOL CatFoodRect(id value,NSRect *rect){
         if([identifier isKindOfClass:NSString.class]&&[identifier length]<=100)session=identifier;
     }
     if(!action)return;
+    if(message.webView==self.quietNoticeWeb){
+        if([action isEqualToString:@"quietNoticeClose"]&&[message.body isKindOfClass:NSDictionary.class])[self closeQuietNotice:message.body[@"notice_id"]];
+        return;
+    }
     if(message.webView==self.chaseWeb){
         if([action isEqualToString:@"chaseReady"]&&self.chaseWanted){[self sendChaseConfiguration];[self reportChase:YES];}
         else if([action isEqualToString:@"chaseAssetError"])[self stopChase];
@@ -810,6 +802,17 @@ static BOOL CatFoodRect(id value,NSRect *rect){
         return;
     }
     if(message.webView!=self.web)return;
+    if([action isEqualToString:@"quietNoticeSeen"]&&[message.body isKindOfClass:NSDictionary.class]){[self rememberQuietNotice:message.body[@"notice_id"]];return;}
+    if([action isEqualToString:@"showQuietNotice"]&&[message.body isKindOfClass:NSDictionary.class]){
+        [self showQuietNotice:message.body[@"notice_id"] kind:message.body[@"kind"]];return;
+    }
+    if([action isEqualToString:@"launcherLayout"]){
+        NSRect rect;
+        if(CatFoodRect(message.body[@"rect"],&rect)&&NSContainsRect(self.web.bounds,rect)){
+            self.launcherBubbleRect=rect;self.launcherHasBubbleRect=YES;[self positionLauncher];
+        }
+        return;
+    }
     if([action hasPrefix:@"chase"]){
         if(session&&self.sessionId&&![session isEqualToString:self.sessionId])return;
         [self updateChaseConfiguration:message.body];
@@ -839,8 +842,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
         self.sessionId=session;self.takeoverGeneration++;
         [self.panel orderFrontRegardless];
         [self.pauseSequences removeAllObjects];
-        self.hostLayout=nil;self.hostLayoutLoading=NO;self.hostLayoutRequestedAt=0;[self.hostHoverAttempts removeAllObjects];
-        self.takeoverStarted=0;self.takeoverReported=NO;
+        self.takeoverStarted=0;self.takeoverReported=NO;self.takeoverFailed=NO;
         if(self.isolatedPreview){self.recording=YES;self.takeoverReported=YES;[self reportNativeState:YES reason:nil];return;}
         if(!AXIsProcessTrusted()){
             if(!self.accessibilityPrompted){
@@ -856,7 +858,7 @@ static BOOL CatFoodRect(id value,NSRect *rect){
     else if([action isEqualToString:@"toggleSettled"]){self.launcherRequest=NO;[self updateLauncher];}
     else if([action isEqualToString:@"dragStart"]){self.dragging=YES;self.dragMouse=NSEvent.mouseLocation;self.dragOrigin=self.panel.frame.origin;}
     else if([action isEqualToString:@"dragEnd"])self.dragging=NO;
-    else if([action isEqualToString:@"dragMove"]&&self.dragging){NSPoint p=NSEvent.mouseLocation;[self.panel setFrameOrigin:NSMakePoint(self.dragOrigin.x+p.x-self.dragMouse.x,self.dragOrigin.y+p.y-self.dragMouse.y)];}
+    else if([action isEqualToString:@"dragMove"]&&self.dragging){NSPoint p=NSEvent.mouseLocation;[self.panel setFrameOrigin:NSMakePoint(self.dragOrigin.x+p.x-self.dragMouse.x,self.dragOrigin.y+p.y-self.dragMouse.y)];[self positionLauncher];}
 }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))handler {
     NSURL *url=action.request.URL;

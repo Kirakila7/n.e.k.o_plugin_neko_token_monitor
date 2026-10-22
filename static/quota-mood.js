@@ -3,6 +3,11 @@
  'use strict';
  const number=value=>value!==null&&value!==''&&typeof value!=='boolean'&&Number.isFinite(Number(value))?Number(value):null;
  function quota(state){
+  const a=state?.allowance;
+  if(a?.schema_version===1){
+   const p=number(a.percent);
+   return p!==null&&a.value!==null?{percent:p,basis:a.basis,stale:!a.can_alert}:null;
+  }
   const c=state?.config||{};
   if(c.source==='codex'){
    const windows=(state.codex_quota?.windows||[]).filter(w=>number(w.remaining)!==null&&number(w.remaining)>=0&&number(w.remaining)<=100);

@@ -190,3 +190,27 @@ def test_other_hosts_cannot_supply_a_visible_deepseek_wallet():
     raw = {'bundle': 'com.google.Chrome', 'host': 'platform.deepseek.com.evil.test',
            'wallet_panels': [['充值余额', '¥0.00 CNY'], ['赠送余额', '¥999 CNY']]}
     assert 'page_wallet' not in foreground.classify(raw)
+
+
+def test_bubble_preference_is_persistent_and_independent_of_tracking(tmp_path):
+    f = fleet.Fleet(tmp_path)
+    assert f.tracking()['bubble_visible'] is True
+    f.follow_foreground({'profile': 'codex', 'status': 'application'})
+    s = f.configure_tracking({'bubble_visible': False})
+    assert s['tracking']['mode'] == 'auto' and s['profile'] == 'codex'
+    assert s['tracking']['bubble_visible'] is False
+    f.configure_tracking({'mode': 'fixed', 'profile': 'qwen'})
+    restarted = fleet.Fleet(tmp_path)
+    assert restarted.tracking()['bubble_visible'] is False
+    assert restarted.selected == 'qwen' and restarted.display_mode == 'fixed'
+    for value in ('false', 0, None, []):
+        try:
+            f.configure_tracking({'mode': 'auto', 'bubble_visible': value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('non-boolean visibility accepted')
+        assert f.display_mode == 'fixed' and f.selected == 'qwen'
+    f.configure_tracking({'bubble_visible': True})
+    assert f.selected == 'qwen' and f.display_mode == 'fixed'
+    assert fleet.Fleet(tmp_path).tracking()['bubble_visible'] is True

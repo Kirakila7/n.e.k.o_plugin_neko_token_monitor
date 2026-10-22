@@ -38,6 +38,34 @@ class AgentStatusTests(unittest.TestCase):
         self.assertEqual(agent_status.classify({"tasks": [{"status": "completed"}]}), {"status": "idle"})
         self.assertEqual(agent_status.classify({"tasks": [{"status": "strange"}]}), {"status": "unknown"})
 
+    def test_completion_requires_observed_task_identity_and_explicit_success(self):
+        status = agent_status.AgentStatus()
+        status.observe_tasks({"status": "idle", "tasks": [{"id": "history", "status": "completed"}]}, now=100)
+        self.assertEqual(status.completion_events, [])
+        status.observe_tasks({"status": "busy", "tasks": [{"id": "a", "status": "running"}, {"id": "b", "status": "running"}]}, now=101)
+        status.observe_tasks({"status": "busy", "tasks": [{"id": "a", "status": "completed"}, {"id": "b", "status": "running"}]}, now=102)
+        self.assertEqual(len(status.completion_events), 1)
+        self.assertEqual(status.completion_events[0]["source"], "neko_tasks")
+        status.observe_tasks({"status": "idle", "tasks": [{"id": "a", "status": "completed"}, {"id": "b", "status": "failed"}]}, now=103)
+        self.assertEqual(len(status.completion_events), 1)
+
+    def test_disappearance_failure_and_unknown_state_are_not_completion(self):
+        status = agent_status.AgentStatus()
+        status.observe_tasks({"status": "busy", "tasks": [{"id": "a", "status": "running"}]}, now=100)
+        status.observe_tasks({"status": "unknown"}, now=101)
+        self.assertEqual(status.completion_events, [])
+        status.observe_tasks({"status": "idle", "tasks": []}, now=102)
+        status.observe_tasks({"status": "idle", "tasks": [{"id": "a", "status": "completed"}]}, now=103)
+        self.assertEqual(status.completion_events, [])
+
+    def test_completion_queue_expires_and_does_not_export_task_ids(self):
+        status = agent_status.AgentStatus()
+        status.observe_tasks({"status": "busy", "tasks": [{"id": "private-task-id", "status": "queued"}]}, now=100)
+        status.observe_tasks({"status": "idle", "tasks": [{"id": "private-task-id", "status": "completed"}]}, now=101)
+        self.assertNotIn("private-task-id", json.dumps(status.completion_events))
+        status.observe_tasks({"status": "idle", "tasks": []}, now=222)
+        self.assertEqual(status.completion_events, [])
+
     def test_model_from_current_crosspet_host_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
